@@ -3,6 +3,26 @@
 MCP server for reduced one-dimensional Small-Angle Neutron Scattering data
 analysis, powered by [IQuana](https://github.com/SasView/IQuana) (formerly SANS-fitter).
 
+> **About this fork.** This is a fork of
+> [ai4se1dk/SANS-pilot](https://github.com/ai4se1dk/SANS-pilot). It ports the
+> server to IQuana 0.6 and adds a guided analysis procedure that local
+> language models can drive: model suggestions from the
+> [Sassafras](https://github.com/SasView/sassafras) curve library, multi-start
+> candidate fits ranked by BIC, joint fitting of contrast and concentration
+> series, text diagnostics, HTML reports, and the `sans-pilot-agent` runner
+> for Ollama, LM Studio and other OpenAI-compatible endpoints. The original
+> typed tools are unchanged and remain the default. See
+> [CHANGELOG.md](CHANGELOG.md), [Guided analysis](#guided-analysis-session-tools)
+> and [Local LLM runner](#local-llm-runner).
+>
+> Quick start, no language model needed:
+>
+> ```bash
+> pip install -e ".[guess]"
+> python -m sassafras.library fetch   # curve library, ~290 MB, once
+> sans-pilot-agent my_data.csv        # writes my_data_analysis/report.html
+> ```
+
 ## Scientific tools
 
 | Tool                          | Purpose                                                            |
