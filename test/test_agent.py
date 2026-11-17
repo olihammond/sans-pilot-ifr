@@ -198,3 +198,55 @@ def test_runner_still_reports_when_the_endpoint_is_unreachable(tmp_path, monkeyp
   assert result.interpretation is None
   assert "Model request failed" in (result.llm_note or "")
   assert "produced no interpretation" in result.report.read_text(encoding="utf-8")
+
+
+def test_runner_reminds_a_model_that_stops_without_refitting(tmp_path, monkeypatch):
+  monkeypatch.setenv("SANS_PILOT_GUESS", "off")
+  requests: list[dict] = []
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    body = json.loads(request.content)
+    requests.append(body)
+    turn = len(requests)
+    if turn == 1:
+      return _reply(
+        content="",
+        tool_calls=[
+          {
+            "id": "c1",
+            "type": "function",
+            "function": {
+              "name": "set-sans-parameter",
+              "arguments": json.dumps({"name": "scale", "vary": False}),
+            },
+          }
+        ],
+      )
+    if turn == 2:
+      return _reply(content="")  # stops early with nothing to say
+    if turn == 3:
+      return _reply(content="")  # ignores the reminder as well
+    return _reply(content="Done.")
+
+  config = AgentConfig(
+    out=tmp_path / "out",
+    data=DATA,
+    model="quiet",
+    extra_models="sphere",
+    plot=False,
+  )
+  result = asyncio.run(
+    run_agent(config, transport=httpx.MockTransport(handler), log=lambda _line: None)
+  )
+
+  reminders = [m["content"] for m in requests[-1]["messages"] if m["role"] == "user"][
+    1:
+  ]
+  assert "without refitting: scale: vary=False" in reminders[0]
+  assert reminders[1].startswith("Your reply was empty")
+  assert result.interpretation == "Done."
+  # The export still succeeds and reports the last completed fit.
+  report = result.report.read_text(encoding="utf-8")
+  assert "Settings changed after this fit and not fitted" in report
+  assert (tmp_path / "out" / "analysis.json").is_file()
+  assert (tmp_path / "out" / "transcript.json").is_file()

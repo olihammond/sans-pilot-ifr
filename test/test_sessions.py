@@ -327,3 +327,41 @@ def test_time_limit_interrupts_a_runaway_fit():
   # Outside the block the alarm is cleared.
   with sessions.time_limit(5):
     pass
+
+
+def test_export_reports_the_last_fit_when_settings_changed_afterwards(workspace):
+  session_id = sessions.create_session(file=None, example="sphere", user_id=None)[
+    "session_id"
+  ]
+  fitted = procedure.fit_suggestions(session_id, None, 1, "sphere")
+  radius = fitted["selected_fit"]["fitted"]["radius"]["value"]
+
+  changed = sessions.set_parameter(
+    session_id,
+    name="scale",
+    value=None,
+    minimum=None,
+    maximum=None,
+    vary=False,
+    user_id=None,
+  )
+  assert changed["unfitted_changes"] == ["scale: vary=False"]
+  assert "run-sans-fit" in changed["note"]
+  assert sessions.session_status(session_id, user_id=None)["unfitted_changes"]
+
+  exported = sessions.export_session(
+    session_id, None, workspace / "export", include_plot=False
+  )
+  assert exported["summary"]["unfitted_changes"] == ["scale: vary=False"]
+  assert "sasview_parameter_values.txt" in exported["artifacts"]
+  report = (workspace / "export" / "report.md").read_text(encoding="utf-8")
+  assert "Settings changed after this fit and not fitted" in report
+  assert "χ²/dof" in report
+  # The exported analysis is the completed fit, with scale still free.
+  reloaded = IQuana.load_analysis(str(workspace / "export" / "analysis.json"))
+  assert reloaded.params["scale"]["vary"] is True
+  assert reloaded.params["radius"]["value"] == pytest.approx(radius, rel=1e-5)
+
+  # Refitting clears the pending list.
+  sessions.run_fit(session_id, method="lm", user_id=None)
+  assert "unfitted_changes" not in sessions.session_status(session_id, user_id=None)

@@ -357,6 +357,7 @@ def _select(session: Session, expression: str) -> dict[str, Any]:
   }
   summaries = session.meta.get("candidate_summaries") or {}
   session.meta["last_fit"] = summaries.get(expression)
+  session.mark_fitted()
   return session.meta["last_fit"] or {}
 
 

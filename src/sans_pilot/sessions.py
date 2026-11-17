@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import shutil
 import signal
 import threading
 import time
@@ -121,6 +122,11 @@ class Session:
     return self.directory / "analysis.json"
 
   @property
+  def fitted_path(self) -> Path:
+    """The analysis as it stood at the last completed fit."""
+    return self.directory / "fitted.json"
+
+  @property
   def meta_path(self) -> Path:
     return self.directory / "session.json"
 
@@ -131,6 +137,18 @@ class Session:
   @property
   def has_model(self) -> bool:
     return self.meta.get("model") is not None and self.analysis_path.is_file()
+
+  def mark_fitted(self) -> None:
+    """Record that the saved analysis and ``last_fit`` describe the same fit."""
+    shutil.copyfile(self.analysis_path, self.fitted_path)
+    self.meta["pending_changes"] = []
+
+  def note_change(self, description: str) -> list[str]:
+    """Record a setting changed after the last fit and not yet fitted."""
+    pending = self.meta.setdefault("pending_changes", [])
+    if self.meta.get("last_fit") is not None:
+      pending.append(description)
+    return list(pending)
 
   def log(self, action: str, **detail: Any) -> None:
     history = self.meta.setdefault("history", [])
@@ -299,6 +317,18 @@ def _next_steps(session: Session) -> list[str]:
   ]
 
 
+def _unfitted(pending: list[str]) -> dict[str, Any]:
+  """Tell the caller that changed settings only take effect after a fit."""
+  result: dict[str, Any] = {"next_steps": ["run-sans-fit to fit with the new settings"]}
+  if pending:
+    result["unfitted_changes"] = pending
+    result["note"] = (
+      "The reported fit predates these changes. Call run-sans-fit before "
+      "finishing, or the report will show the previous fit."
+    )
+  return result
+
+
 def data_summary(session: Session) -> dict[str, Any]:
   info = session.meta.get("data", {})
   return {
@@ -422,6 +452,8 @@ def set_model(
     fitter = new_fitter(session, model, structure_factor)
   session.meta["model"] = {"model": model, "structure_factor": structure_factor}
   session.meta["last_fit"] = None
+  session.meta["pending_changes"] = []
+  session.fitted_path.unlink(missing_ok=True)
   save_fitter(session, fitter)
   session.log("set_model", model=model_expression(session))
   session.save()
@@ -470,13 +502,16 @@ def set_parameter(
   with quiet_science():
     fitter.set_param(name, **changes)
   save_fitter(session, fitter)
+  pending = session.note_change(
+    f"{name}: " + ", ".join(f"{key}={item}" for key, item in changes.items())
+  )
   session.log("set_parameter", name=name, **changes)
   session.save()
   return {
     "session_id": session.id,
     "parameter": {name: parameter_table(fitter)[name]},
     "varying": [key for key, row in parameter_table(fitter).items() if row["vary"]],
-    "next_steps": ["run-sans-fit to fit with the new settings"],
+    **_unfitted(pending),
   }
 
 
@@ -505,11 +540,14 @@ def set_polydispersity(
   session.log(
     "set_polydispersity", parameter=parameter, width=width, distribution=distribution
   )
+  pending = session.note_change(
+    f"polydispersity of {parameter}: width={width}, distribution={distribution}"
+  )
   session.save()
   return {
     "session_id": session.id,
     "polydispersity": polydispersity_table(fitter),
-    "next_steps": ["run-sans-fit to fit with the new settings"],
+    **_unfitted(pending),
   }
 
 
@@ -539,12 +577,13 @@ def set_q_range(
       else:
         fitter.set_q_range(qmin=q_min, qmax=q_max)
     save_fitter(session, fitter)
+  pending = session.note_change(f"Q range: q_min={q_min}, q_max={q_max}")
   session.log("set_q_range", q_min=q_min, q_max=q_max)
   session.save()
   return {
     "session_id": session.id,
     "data": data_summary(session),
-    "next_steps": _next_steps(session),
+    **(_unfitted(pending) if pending else {"next_steps": _next_steps(session)}),
   }
 
 
@@ -643,6 +682,7 @@ def run_fit(
     summary = summarize_fit(fitter, fit_result)
   save_fitter(session, fitter)
   session.meta["last_fit"] = summary
+  session.mark_fitted()
   session.log(
     "fit",
     model=model_expression(session),
@@ -675,6 +715,8 @@ def session_status(session_id: str, *, user_id: str | None) -> dict[str, Any]:
     status["parameters"] = parameter_table(fitter)
     status["polydispersity"] = polydispersity_table(fitter)
   status["last_fit"] = session.meta.get("last_fit")
+  if session.meta.get("pending_changes"):
+    status["unfitted_changes"] = session.meta["pending_changes"]
   status["candidates"] = session.meta.get("candidates") or []
   status["diagnostic_thresholds"] = THRESHOLDS
   status["next_steps"] = _next_steps(session)
@@ -739,9 +781,29 @@ def report_markdown(session: Session, fitter: IQuana | None) -> str:
 
   lines += ["", f"## Selected model: `{model_expression(session) or 'none'}`", ""]
   last_fit = meta.get("last_fit")
-  if fitter is not None and last_fit is not None:
-    with quiet_science():
-      lines.append(fitter.get_fit_report().to_markdown())
+  if last_fit is not None:
+    if fitter is not None and fitter.fit_result is not None:
+      with quiet_science():
+        lines.append(fitter.get_fit_report().to_markdown())
+    else:
+      # No IQuana result to render (settings changed after the fit and no
+      # fitted snapshot exists): fall back to the stored summary.
+      lines += ["| Statistic | Value |", "|---|---|"]
+      lines += [f"| {key} | {value} |" for key, value in last_fit["statistics"].items()]
+      lines += ["", "| Parameter | Value | Std. error |", "|---|---|---|"]
+      lines += [
+        f"| {name} | {entry['value']} | {entry['stderr']} |"
+        for name, entry in last_fit.get("fitted", {}).items()
+      ]
+    pending = meta.get("pending_changes") or []
+    if pending:
+      lines += [
+        "",
+        "**Settings changed after this fit and not fitted** (the results "
+        "above do not include them):",
+        "",
+        *[f"- {item}" for item in pending],
+      ]
     diagnostics = last_fit.get("diagnostics", {})
     lines += ["", "## Diagnostics", "", f"**Verdict: {diagnostics.get('verdict')}**"]
     if diagnostics.get("issues"):
@@ -781,6 +843,16 @@ def export_session(
   output_dir = Path(output_dir)
   output_dir.mkdir(parents=True, exist_ok=True)
   fitter = open_fitter(session) if session.has_model else None
+  pending = session.meta.get("pending_changes") or []
+  if fitter is not None and pending and session.fitted_path.is_file():
+    # Export the last completed fit, not half-applied settings.
+    with quiet_science():
+      fitter = IQuana.load_analysis(str(session.fitted_path))
+  has_fit = (
+    fitter is not None
+    and session.meta.get("last_fit") is not None
+    and fitter.fit_result is not None
+  )
   artifacts: dict[str, Path] = {}
 
   report_path = output_dir / "report.md"
@@ -793,7 +865,7 @@ def export_session(
       fitter.save_analysis(str(analysis_path))
     artifacts[analysis_path.name] = analysis_path
 
-    if session.meta.get("last_fit") is not None:
+    if has_fit:
       rows = build_parameter_export(
         model=model_expression(session) or "",
         params=fitter.params,
@@ -829,6 +901,7 @@ def export_session(
       "session_id": session.id,
       "model": model_expression(session),
       "last_fit": session.meta.get("last_fit"),
+      "unfitted_changes": pending,
       "artifacts": [
         {"name": name, "mime_type": mime_types.get(path.suffix, "text/plain")}
         for name, path in artifacts.items()

@@ -61,7 +61,8 @@ Do this, in order:
 2. If the selected fit's diagnostics list issues, act on ONE suggestion with
    set-sans-parameter, set-sans-polydispersity or set-sans-q-range, then call
    run-sans-fit. Make at most three refinements. Stop early when the verdict is
-   good or acceptable and no issue remains that you can act on.
+   good or acceptable and no issue remains that you can act on. Every change
+   must be followed by run-sans-fit: unfitted changes are not reported.
 3. Reply WITHOUT calling a tool to finish. Write a short interpretation: the
    model chosen and why, each fitted value with its uncertainty and unit
    (lengths are in angstrom), the reduced chi-squared and verdict, and any
@@ -280,6 +281,7 @@ async def refine_with_model(
   ]
   note: str | None = None
   steps = 0
+  reminded: set[str] = set()
   async with httpx.AsyncClient(
     base_url=config.base_url.rstrip("/"),
     headers={"Authorization": f"Bearer {config.api_key}"},
@@ -329,7 +331,28 @@ async def refine_with_model(
       messages.append(assistant)
       if not calls:
         text = (message.get("content") or "").strip()
-        return text or None, note, steps, messages
+        reminder = None
+        if not final_turn and "unfitted" not in reminded:
+          status = json.loads(
+            await _call_tool(
+              client, "get-sans-analysis", {"session_id": guided["session_id"]}
+            )
+          )
+          if status.get("unfitted_changes"):
+            reminded.add("unfitted")
+            reminder = (
+              "You changed settings without refitting: "
+              + "; ".join(status["unfitted_changes"])
+              + ". Call run-sans-fit now, or these changes will be discarded "
+              "and the previous fit reported."
+            )
+        if reminder is None and not text and "empty" not in reminded:
+          reminded.add("empty")
+          reminder = "Your reply was empty. Write the final interpretation now."
+        if reminder is None or final_turn:
+          return text or None, note, steps, messages
+        messages.append({"role": "user", "content": reminder})
+        continue
 
       native = bool(message.get("tool_calls"))
       for call in calls:
@@ -485,6 +508,15 @@ async def run_agent(
     elif config.model:
       note = "The model was not consulted because no candidate fit succeeded."
 
+  # Written first so a failure later still leaves the conversation to inspect.
+  (config.out / "guided_result.json").write_text(
+    json.dumps(guided, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
+  )
+  if transcript:
+    (config.out / "transcript.json").write_text(
+      json.dumps(transcript, indent=2, ensure_ascii=False, default=str),
+      encoding="utf-8",
+    )
   exported = await anyio.to_thread.run_sync(
     lambda: sessions.export_session(session_id, None, config.out, config.plot)
   )
@@ -503,13 +535,10 @@ async def run_agent(
     llm_steps=steps,
   )
   _append_report(result.report, config, result, guided)
-  (config.out / "guided_result.json").write_text(
-    json.dumps(guided, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
-  )
-  if transcript:
-    (config.out / "transcript.json").write_text(
-      json.dumps(transcript, indent=2, ensure_ascii=False, default=str),
-      encoding="utf-8",
+  if summary.get("unfitted_changes"):
+    log(
+      "  note: the model changed settings without refitting; the report shows "
+      "the last completed fit and lists the unfitted changes."
     )
   log(f"Model: {result.model}  verdict: {result.verdict}")
   log(f"Report: {result.report}")
