@@ -633,7 +633,11 @@ def test_scale_never_exceeds_one_and_the_cap_is_explained(workspace):
   session_id = sessions.create_session(file=name, example=None, user_id=None)[
     "session_id"
   ]
-  result = procedure.fit_suggestions(session_id, None, 1, "sphere")
+  # With the SLDs known, the intensity needs scale = 5: the cap holds and the
+  # fit says why it cannot reach the data.
+  result = procedure.fit_suggestions(
+    session_id, None, 1, "sphere", True, "sld=1,sld_solvent=6"
+  )
   sphere = next(c for c in result["candidates"] if c["model"] == "sphere")
   assert sphere["fitted"]["scale"] <= 1.0
   issues = " ".join(result["selected_fit"]["diagnostics"]["issues"])
@@ -659,6 +663,24 @@ def test_scale_never_exceeds_one_and_the_cap_is_explained(workspace):
     user_id=None,
   )
   assert clipped["parameter"]["scale"]["max"] == 1.0
+
+
+def test_without_known_slds_the_contrast_carries_the_intensity(workspace):
+  name = _upload_sphere(workspace, scale=5.0)
+  session_id = sessions.create_session(file=name, example=None, user_id=None)[
+    "session_id"
+  ]
+  result = procedure.fit_suggestions(session_id, None, 1, "sphere")
+
+  sphere = next(c for c in result["candidates"] if c["model"] == "sphere")
+  assert sphere["contrast_fitted"] == ["sld"]
+  assert any("scale is held at 1" in note for note in sphere["procedure_notes"])
+  assert result["selected_fit"]["fixed"]["scale"] == 1.0
+  assert sphere["fitted"]["radius"] == pytest.approx(50.0, rel=0.03)
+  # scale x contrast^2 is what the data fixes: 5 x (1 - 6)^2 = 125.
+  contrast = sphere["fitted"]["sld"] - result["selected_fit"]["fixed"]["sld_solvent"]
+  assert contrast**2 == pytest.approx(125.0, rel=0.05)
+  assert result["selected_fit"]["diagnostics"]["verdict"] in {"good", "acceptable"}
 
 
 def test_scale_limit_can_be_raised_for_arbitrary_units(workspace, monkeypatch):
@@ -730,3 +752,117 @@ def test_reports_say_when_the_q_range_was_restricted(workspace):
   assert " of " in report.split("Points fitted:")[1].splitlines()[0]
   page = (workspace / "export" / "report.html").read_text(encoding="utf-8")
   assert "Q range restricted" in page
+
+
+TRUTH_A = {
+  "radius": 48.0,
+  "thickness": 32.0,
+  "sld_core": 0.34,
+  "sld_shell": 5.75,
+  "sld_solvent": 6.36,
+  "radius_effective": 80.0,
+  "volfraction": 0.16,
+  "scale": 1.0,
+  "background": 0.07,
+}
+# Starting values the Sassafras curve library returned for this curve.
+LIBRARY_START_A = {
+  "parameters": {
+    "background": 0.0664248,
+    "radius": 27.7609,
+    "radius_effective": 78.9403,
+    "scale": 3.94238,
+    "sld_core": -0.457121,
+    "sld_shell": 2.00641,
+    "sld_solvent": 3.0,
+    "thickness": 35.867,
+    "volfraction": 0.177353,
+  },
+  "polydispersity": {
+    "radius": {"width": 0.2, "distribution": "schulz"},
+    "thickness": {"width": 0.2, "distribution": "schulz"},
+  },
+}
+
+
+def _upload_micelles(workspace):
+  """Core-shell micelles with hard-sphere interactions, 10% polydisperse."""
+  import numpy as np
+  from iquana import IQuana
+  from sasdata.dataloader.data_info import Data1D
+
+  q = np.geomspace(0.004, 0.45, 120)
+  with sessions.quiet_science():
+    fitter = IQuana()
+    fitter.set_data(Data1D(x=q, y=np.ones_like(q), dy=np.ones_like(q)))
+    fitter.set_model("core_shell_sphere")
+    fitter.set_structure_factor("hardsphere")
+    fitter.set_resolution("none")
+    for name, value in TRUTH_A.items():
+      fitter.set_param(name, value=value)
+    fitter.enable_polydispersity(True)
+    fitter.set_pd_param("radius", pd_width=0.1, pd_type="gaussian")
+    intensity = np.asarray(fitter.calculate(), dtype=float)
+  sigma = 0.02 * intensity + 0.003
+  noisy = intensity + np.random.default_rng(7).normal(0.0, sigma)
+  np.savetxt(
+    workspace / "uploads" / "micelles.csv",
+    np.c_[q, noisy, sigma],
+    delimiter=",",
+    header="Q,I,dI",
+    comments="",
+  )
+  return "micelles.csv"
+
+
+def test_core_shell_micelles_are_recovered_without_known_slds(workspace, monkeypatch):
+  def fake_suggest(data, *, top, starting_values, also, usable=None):
+    return {
+      "suggestions": [
+        {
+          "model": "core_shell_sphere",
+          "structure_factor": "hardsphere",
+          "expression": "core_shell_sphere@hardsphere",
+          "library_chisq_n": 3.9,
+          "loadable": True,
+          "start": LIBRARY_START_A,
+        }
+      ],
+      "requested": [],
+    }
+
+  monkeypatch.setattr(procedure, "guess_status", lambda: {"available": True})
+  monkeypatch.setattr(procedure, "suggest_models", fake_suggest)
+  name = _upload_micelles(workspace)
+  session_id = sessions.create_session(file=name, example=None, user_id=None)[
+    "session_id"
+  ]
+  result = procedure.fit_suggestions(session_id, None, 1, None, False)
+
+  fit = result["selected_fit"]
+  fitted = {key: entry["value"] for key, entry in fit["fitted"].items()}
+  solvent = fit["fixed"]["sld_solvent"]
+  assert fit["statistics"]["reduced_chisq"] < 1.5
+  assert fitted["radius"] == pytest.approx(48.0, rel=0.03)
+  assert fitted["thickness"] == pytest.approx(32.0, rel=0.05)
+  assert fitted["radius_effective"] == pytest.approx(80.0, rel=0.03)
+  assert fitted["volfraction"] == pytest.approx(0.16, rel=0.08)
+  assert fitted["radius_pd"] == pytest.approx(0.1, abs=0.02)
+  # Contrasts relative to the solvent: core -6.02, shell -0.61.
+  assert fitted["sld_core"] - solvent == pytest.approx(-6.02, rel=0.05)
+  assert fitted["sld_shell"] - solvent == pytest.approx(-0.61, abs=0.1)
+  assert fit["fixed"]["scale"] == 1.0
+
+
+def test_switching_to_a_much_worse_candidate_is_warned_about(workspace):
+  name = _upload_sphere(workspace, scale=0.05)
+  session_id = sessions.create_session(file=name, example=None, user_id=None)[
+    "session_id"
+  ]
+  result = procedure.fit_suggestions(session_id, None, 1, "sphere,cylinder")
+  ranked = [c for c in result["candidates"] if "error" not in c]
+  worst, best = ranked[-1], ranked[0]
+  switched = procedure.use_candidate(session_id, None, worst["model"])
+  assert worst["reduced_chisq"] > 2 * best["reduced_chisq"]
+  assert "fits the data much worse" in switched["warning"]
+  assert "warning" not in procedure.use_candidate(session_id, None, best["model"])

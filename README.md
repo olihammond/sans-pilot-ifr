@@ -155,6 +155,15 @@ Guinier) use `scale` as a free prefactor and are not limited. For data in
 arbitrary units, raise the limit with `SANS_PILOT_SCALE_MAX`. The typed
 `fit-sans-model` tool uses the bounds given in the request.
 
+Without known SLDs, the curve library's SLDs are placeholders that reproduce a
+curve's shape, not its absolute intensity. When the data needs more intensity
+than `scale` <= 1 allows, the procedure holds `scale` at the limit and fits
+the particle SLDs relative to the solvent instead, so contrast ratios (which
+shape core-shell curves) are fitted too. Only `scale` × contrast² is
+determined by the data, so the fitted SLDs are physical only when `scale` = 1
+is right, as for absolute data with a structure factor. The report says when
+this happened; supplying known SLDs removes the ambiguity.
+
 ### Series of curves
 
 Curves from the same particles (a contrast series, a concentration series,

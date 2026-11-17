@@ -306,3 +306,65 @@ def test_the_model_cannot_change_the_q_range():
 
   assert "set-sans-q-range" not in MODEL_TOOLS
   assert "Q range is the user's choice" in SYSTEM_PROMPT
+
+
+def test_report_flags_a_switch_to_a_worse_model_and_a_stale_interpretation(
+  tmp_path, monkeypatch
+):
+  monkeypatch.setenv("SANS_PILOT_GUESS", "off")
+  requests: list[dict] = []
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    body = json.loads(request.content)
+    requests.append(body)
+    if len(requests) == 1:
+      brief = json.loads(body["messages"][1]["content"].split("result:\n", 1)[1])
+      worst = max(
+        (c for c in brief["candidates"] if "error" not in c),
+        key=lambda c: c["reduced_chisq"],
+      )
+      return _reply(
+        content="",
+        tool_calls=[
+          {
+            "id": "a",
+            "type": "function",
+            "function": {
+              "name": "use-sans-candidate",
+              "arguments": json.dumps({"model": worst["model"]}),
+            },
+          }
+        ],
+      )
+    return _reply(content="The sphere describes the data well.")
+
+  import numpy as np
+  from iquana import examples
+
+  spheres = examples.simulate(
+    "sphere", seed=3, npoints=100, qmin=0.005, qmax=0.3, radius=50, scale=0.05
+  )
+  data = tmp_path / "spheres.csv"
+  np.savetxt(
+    data,
+    np.c_[spheres.x, spheres.y, spheres.dy],
+    delimiter=",",
+    header="Q,I,dI",
+    comments="",
+  )
+  config = AgentConfig(
+    out=tmp_path / "out",
+    data=data,
+    model="switcher",
+    extra_models="cylinder,sphere",
+    plot=False,
+  )
+  result = asyncio.run(
+    run_agent(config, transport=httpx.MockTransport(handler), log=lambda _line: None)
+  )
+  report = result.report.read_text(encoding="utf-8")
+  switched = [m for m in requests[1]["messages"] if m["role"] == "tool"][0]
+  assert "fits the data much worse" in switched["content"]
+  assert "made the fit worse: it switched to a model" in report
+  assert result.model is not None and "sphere" not in result.model
+  assert "may describe an earlier state" in report

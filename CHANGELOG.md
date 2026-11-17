@@ -49,6 +49,12 @@
 - The language model cannot change the Q range: dropping low-Q points let a
   wrong model win. Diagnostics no longer suggest trimming data, and reports
   state when only part of the data was fitted.
+- Without known SLDs, a fit that needs more intensity than the scale limit
+  allows fits the particle contrasts instead (scale held at the limit), so
+  the correct model is no longer lost to placeholder SLDs. Restarts are
+  compared with one fitted size distribution, like the kept fit.
+- Switching to a candidate that fits much worse is warned about, and reports
+  flag such a switch and interpretations that describe an earlier model.
 - Fixed polydispersity attached by the curve library is removed when the fit
   is better without it.
 - Warnings from discarded trial fits no longer appear in results.

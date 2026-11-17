@@ -144,7 +144,7 @@ def _build(
     if "dq" not in active_arrays(data):
       fitter.set_resolution("none")
     known = {**fixed, **{name: values[index] for name, values in per_file.items()}}
-    _configure_candidate(fitter, expression, plain, known)
+    _configure_candidate(fitter, expression, plain, known, fit_contrast=False)
     for name, value in trial.items():
       if name in fitter.params:
         fitter.set_param(name, value=value)

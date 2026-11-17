@@ -456,15 +456,25 @@ def _comparison(
       f"it is `{result.model}` (χ² {chisq_after}, χ²/dof "
       f"{after.get('reduced_chisq')}, {after.get('n_free')} free)."
     )
+    reduced_before, reduced_after = (
+      before.get("reduced_chisq"),
+      after.get("reduced_chisq"),
+    )
     if (
-      same_model
-      and isinstance(chisq_before, (int, float))
-      and isinstance(chisq_after, (int, float))
-      and chisq_after > 1.5 * chisq_before
+      isinstance(reduced_before, (int, float))
+      and isinstance(reduced_after, (int, float))
+      and reduced_after > 1.5 * reduced_before
     ):
       lines.append(
-        "**The refinement made the fit worse.** Prefer `analysis_guided.json` "
-        "unless the change is justified by knowledge of the sample."
+        "**The language model's turn made the fit worse"
+        + (
+          "."
+          if same_model
+          else f": it switched to a model that fits much worse ({reduced_after} "
+          f"against {reduced_before} χ²/dof)."
+        )
+        + "** Prefer `analysis_guided.json` unless the change is justified by "
+        "knowledge of the sample."
       )
   conditional = last_fit.get("conditional_on") or []
   if conditional:
@@ -507,6 +517,15 @@ def _append_report(
     "Written by a language model from the results above. It has not been "
     "checked; verify numbers against the tables in this report."
   )
+  if (
+    result.interpretation
+    and result.model
+    and result.model.partition("@")[0] not in result.interpretation
+  ):
+    disclaimer += (
+      f" It does not mention the model the analysis ended with "
+      f"(`{result.model}`), so it may describe an earlier state."
+    )
   interpretation = result.interpretation or "_The model produced no interpretation._"
 
   lines = ["", "## How this report was produced", "", *produced]

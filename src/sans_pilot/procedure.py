@@ -12,6 +12,7 @@ model follows instructions:
 
 from __future__ import annotations
 
+import functools
 import math
 import shutil
 import time
@@ -236,6 +237,9 @@ def _solve_scale_background(fitter: IQuana, keep_bounds: bool = False) -> None:
   """
   if "scale" not in fitter.params or "background" not in fitter.params:
     return
+  if not fitter.params["scale"].get("vary", True) and keep_bounds:
+    # A held scale (contrast fitted instead) stays where it was put.
+    return
   arrays = active_arrays(fitter.data)
   fitter.set_param("scale", value=1.0)
   fitter.set_param("background", value=0.0)
@@ -291,11 +295,190 @@ def parse_fixed_parameters(text: str | None) -> dict[str, float]:
   return fixed
 
 
+@functools.lru_cache(maxsize=256)
+def particle_slds(expression: str) -> tuple[str, ...]:
+  """SLD parameters of the particle (not the solvent) in a model."""
+  try:
+    from sasmodels.core import load_model_info
+
+    parameters = load_model_info(
+      expression.partition("@")[0]
+    ).parameters.kernel_parameters
+  except Exception:
+    return ()
+  return tuple(
+    parameter.name
+    for parameter in parameters
+    if parameter.type == "sld" and "solvent" not in parameter.name
+  )
+
+
+def _needed_scale(fitter: IQuana) -> float | None:
+  """The scale a weighted least-squares solve would give, ignoring bounds."""
+  if "scale" not in fitter.params or "background" not in fitter.params:
+    return None
+  current = float(fitter.params["scale"]["value"] or 0.0)
+  if current <= 0:
+    return None
+  arrays = active_arrays(fitter.data)
+  theory = np.asarray(fitter.calculate(), dtype=float)
+  if theory.shape == arrays["index"].shape:
+    theory = theory[arrays["index"]]
+  if theory.shape != arrays["q"].shape:
+    return None
+  unit = (theory - float(fitter.params["background"]["value"])) / current
+  weight = (
+    1.0 / arrays["di"]
+    if "di" in arrays
+    else 1.0 / np.maximum(np.abs(arrays["i"]), 1e-30)
+  )
+  finite = np.isfinite(unit) & np.isfinite(weight) & (weight > 0)
+  if int(np.sum(finite)) < 3 or not np.any(unit[finite] != 0):
+    return None
+  design = np.c_[unit[finite], np.ones(int(np.sum(finite)))] * weight[finite, None]
+  (scale, _), *_ = np.linalg.lstsq(
+    design, arrays["i"][finite] * weight[finite], rcond=None
+  )
+  return float(scale) if math.isfinite(scale) else None
+
+
+def _fit_contrast_instead_of_scale(
+  fitter: IQuana, expression: str, known: dict[str, float]
+) -> bool:
+  """Let the particle SLDs carry the intensity when scale would exceed its cap.
+
+  The curve library's SLDs are placeholders chosen to reproduce the shape of a
+  curve, not its absolute intensity.  When the intensity needs a scale above
+  the volume-fraction limit and the user supplied no particle SLDs, the
+  contrast against the solvent is scaled up to deliver it, scale is held at
+  the limit, and the particle SLDs are fitted.  Contrast ratios (which set
+  the shape of core-shell models) are then fitted too.
+  """
+  cap = scale_limit(expression)
+  names = [name for name in particle_slds(expression) if name in fitter.params]
+  if (
+    cap is None
+    or not names
+    or "sld_solvent" not in fitter.params
+    or any(name in known for name in names)
+  ):
+    return False
+  needed = _needed_scale(fitter)
+  if needed is None or needed <= cap * 1.0001:
+    return False
+  factor = math.sqrt(needed / cap)
+  solvent = float(fitter.params["sld_solvent"]["value"])
+  for name in names:
+    contrast = (float(fitter.params[name]["value"]) - solvent) * factor
+    span = 4.0 * abs(contrast) + 1.0
+    fitter.set_param(
+      name,
+      value=solvent + contrast,
+      min=solvent - span,
+      max=solvent + span,
+      vary=True,
+    )
+  low = fitter.params["scale"].get("min")
+  fitter.set_param(
+    "scale",
+    value=cap,
+    min=min(float(low), cap) if low is not None else None,
+    max=cap,
+    vary=False,
+  )
+  return True
+
+
+def _with_fitted_spread(
+  fitter: IQuana,
+  start: dict[str, Any] | None,
+  fit_result: dict[str, Any],
+  options: dict[str, Any],
+) -> dict[str, Any]:
+  """Refit a monodisperse restart with one free size-distribution width.
+
+  The width goes on the first size the curve library gave a distribution
+  (10% start, same distribution type).  The original result is returned if
+  the refit fails or is worse.
+  """
+  spreads = (start or {}).get("polydispersity") or {}
+  supported = {str(name) for name in fitter.get_polydisperse_parameters()}
+  target = next(
+    (
+      name
+      for name in spreads
+      if name in supported and fitter.params.get(name, {}).get("vary")
+    ),
+    None,
+  )
+  if target is None:
+    return fit_result
+  try:
+    fitter.enable_polydispersity(True)
+    fitter.set_pd_param(
+      target,
+      pd_width=0.1,
+      pd_type=str(spreads[target].get("distribution") or "schulz"),
+      vary=True,
+    )
+    with time_limit(CANDIDATE_METHOD_SECONDS):
+      refit = fitter.fit(engine="bumps", method="lm", **options)
+  except Exception:
+    return fit_result
+  if float(refit.get("chisq", math.inf)) < float(fit_result.get("chisq", math.inf)):
+    return refit
+  return fit_result
+
+
+def _rescale_contrast(fitter: IQuana) -> None:
+  """In contrast mode, scale the fitted SLD contrasts to match the intensity.
+
+  Used for restarts: new sizes change the particle volume and so the
+  intensity, which the (fixed) scale cannot follow.
+  """
+  if fitter.params.get("scale", {}).get("vary", True):
+    return
+  names = [
+    name
+    for name, row in fitter.params.items()
+    if row.get("vary") and name.startswith("sld") and "solvent" not in name
+  ]
+  if not names or "sld_solvent" not in fitter.params:
+    return
+  scale = float(fitter.params["scale"]["value"] or 0.0)
+  needed = _needed_scale(fitter)
+  if not needed or needed <= 0 or scale <= 0:
+    return
+  factor = math.sqrt(needed / scale)
+  solvent = float(fitter.params["sld_solvent"]["value"])
+  for name in names:
+    row = fitter.params[name]
+    value = solvent + (float(row["value"]) - solvent) * factor
+    low, high = row.get("min"), row.get("max")
+    fitter.set_param(
+      name,
+      value=value,
+      min=min(float(low), value) if low is not None else None,
+      max=max(float(high), value) if high is not None else None,
+    )
+
+
+CONTRAST_NOTE = (
+  "The curve library's SLDs gave too little intensity for scale <= {cap:g}, so "
+  "scale is held at {cap:g} and the particle SLDs ({names}) were fitted "
+  "relative to the solvent instead. The data fixes only scale x contrast^2: "
+  "the fitted SLDs are meaningful only if scale = {cap:g} is right (as for "
+  "absolute data with a structure factor). Supply known SLDs to remove this "
+  "ambiguity."
+)
+
+
 def _configure_candidate(
   fitter: IQuana,
   expression: str,
   start: dict[str, Any] | None,
   fixed: dict[str, float] | None = None,
+  fit_contrast: bool = True,
 ) -> list[str]:
   """Apply starting values and choose bounded free parameters for one fit."""
   notes: list[str] = []
@@ -382,33 +565,41 @@ def _configure_candidate(
       continue
     fitter.set_param(name, min=low, max=high, vary=True)
   apply_scale_cap(fitter, expression)
+  if fit_contrast:
+    _fit_contrast_instead_of_scale(fitter, expression, known)
   return notes
 
 
-def _degenerate_with_scale(fit_result: dict[str, Any]) -> list[str]:
-  """Name free parameters whose effect is indistinguishable from the scale."""
+def _degenerate_with_scale(
+  fit_result: dict[str, Any], intensity: tuple[str, ...] = ("scale",)
+) -> list[str]:
+  """Name free parameters whose effect is indistinguishable from the scale.
+
+  ``intensity`` names the free parameters that set the overall intensity:
+  ``scale`` normally, the particle SLDs when the contrast is fitted instead.
+  """
   labels = [str(label) for label in fit_result.get("cov_labels") or []]
   cov = fit_result.get("cov")
-  if cov is None or "scale" not in labels:
+  references = [labels.index(name) for name in intensity if name in labels]
+  if cov is None or not references:
     return []
   matrix = np.asarray(cov, dtype=float)
   if matrix.shape != (len(labels), len(labels)):
     return []
-  index = labels.index("scale")
   names = []
   for other, label in enumerate(labels):
-    if other == index or label == "background":
-      continue
-    denominator = math.sqrt(abs(matrix[index, index] * matrix[other, other]))
-    if not denominator:
+    if other in references or label == "background":
       continue
     limit = (
       PREFACTOR_CORRELATION
       if label.startswith(PREFACTOR_NAMES)
       else DEGENERATE_CORRELATION
     )
-    if abs(matrix[index, other] / denominator) >= limit:
-      names.append(label)
+    for index in references:
+      denominator = math.sqrt(abs(matrix[index, index] * matrix[other, other]))
+      if denominator and abs(matrix[index, other] / denominator) >= limit:
+        names.append(label)
+        break
   return names
 
 
@@ -425,7 +616,14 @@ def _resolve_scale_degeneracy(
   parameters go back to their starting value and stay fixed; only their
   product with the scale is determined, and the report says so.
   """
-  names = _degenerate_with_scale(fit_result)
+  intensity = ("scale",)
+  if not fitter.params.get("scale", {}).get("vary", True):
+    intensity = tuple(
+      name
+      for name, row in fitter.params.items()
+      if row.get("vary") and name.startswith("sld") and "solvent" not in name
+    )
+  names = _degenerate_with_scale(fit_result, intensity)
   if not names:
     return fit_result, []
   for name in names:
@@ -436,7 +634,7 @@ def _resolve_scale_degeneracy(
     refit = fitter.fit(engine="bumps", method="lm", **options)
   notes = [
     f"{name} only rescales the intensity in this model, so it cannot be "
-    f"separated from scale. It is held at {fitter.params[name]['value']:.4g} "
+    f"separated from {' / '.join(intensity)}. It is held at {fitter.params[name]['value']:.4g} "
     "(its starting value); only the product with scale is determined."
     for name in names
   ]
@@ -653,6 +851,7 @@ def _fit_candidate(
             _configure_candidate(other, expression, plain, fixed)
             for name, value in trial.items():
               other.set_param(name, value=value)
+            _rescale_contrast(other)
             _solve_scale_background(other, keep_bounds=True)
             other_options, other_cost, _ = _fit_budget(other)
             if other_cost > RESTART_MAX_CURVE_SECONDS:
@@ -661,6 +860,12 @@ def _fit_candidate(
               other_result = other.fit(engine="bumps", method="lm", **other_options)
           except Exception:
             continue
+          if has_spread:
+            # The kept fit carries the library's size distribution; give each
+            # restart one fitted width so they are compared fairly.
+            other_result = _with_fitted_spread(
+              other, start, other_result, other_options
+            )
           chisq = float(other_result.get("chisq", math.inf))
           if math.isfinite(chisq) and chisq < best * (1.0 - 1e-4):
             best, fitter, fit_result = chisq, other, other_result
@@ -669,6 +874,18 @@ def _fit_candidate(
       candidate["starts_tried"] = restarts + 1
 
       procedure_notes: list[str] = []
+      contrast = [
+        name
+        for name in particle_slds(expression)
+        if fitter.params.get(name, {}).get("vary")
+      ]
+      if contrast and not fitter.params.get("scale", {}).get("vary", True):
+        procedure_notes.append(
+          CONTRAST_NOTE.format(
+            cap=float(fitter.params["scale"]["value"]), names=", ".join(contrast)
+          )
+        )
+        candidate["contrast_fitted"] = contrast
       final_options, _, _ = _fit_budget(fitter)
       fit_result, degenerate = _resolve_scale_degeneracy(
         fitter, fit_result, initial, final_options
@@ -1031,13 +1248,30 @@ def use_candidate(session_id: str, user_id: str | None, model: str) -> dict[str,
   session.save()
   with quiet_science():
     fitter = IQuana.load_analysis(str(session.analysis_path))
-  return {
+  result: dict[str, Any] = {
     "session_id": session.id,
     "model": model_expression(session),
     "parameters": parameter_table(fitter),
     "last_fit": last_fit or None,
     "next_steps": _next_steps(session),
   }
+  ranked = [
+    item
+    for item in session.meta.get("candidates") or []
+    if isinstance(item.get("reduced_chisq"), (int, float))
+  ]
+  chosen = next((item for item in ranked if item["model"] == model.strip()), None)
+  if ranked and chosen is not None and ranked[0]["model"] != chosen["model"]:
+    best = ranked[0]
+    if chosen["reduced_chisq"] > 2.0 * best["reduced_chisq"]:
+      result["warning"] = (
+        f"{chosen['model']} fits the data much worse than {best['model']} "
+        f"(χ²/dof {chosen['reduced_chisq']} against {best['reduced_chisq']}). "
+        "Choose it only if the sample rules out the better-fitting model, and "
+        "say so in the interpretation; plausibility alone does not make a poor "
+        "fit right."
+      )
+  return result
 
 
 def guided_analysis(
