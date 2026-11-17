@@ -13,7 +13,10 @@ _MAX_FALLBACK_CHARS = 1_000
 _NON_ACTIONABLE_WARNING_MESSAGES = frozenset(
   {"Deprecated: use of problem.fitness will be removed at some point"}
 )
-_NON_ACTIONABLE_WARNING_PREFIXES = ("Support for the 'engine' argument is deprecated",)
+_NON_ACTIONABLE_WARNING_PREFIXES = (
+  "Support for the 'engine' argument is deprecated",
+  "Setting the shape on a NumPy array has been deprecated",
+)
 _OPTIMIZER_METADATA_FIELDS = (
   "success",
   "status",

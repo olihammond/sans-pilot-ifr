@@ -26,6 +26,134 @@ analysis, powered by [IQuana](https://github.com/SasView/IQuana) (formerly SANS-
 | `simulate-sans-pair`          | Generate a matched sample/background pair                          |
 | `read-sans-artifact`          | Reopen a user-scoped image or chunked CSV/text artifact            |
 
+## Tool profiles
+
+`SANS_PILOT_TOOLS` selects which tools the server exposes:
+
+| Profile          | Tools                                                                 | Intended for                         |
+| ---------------- | --------------------------------------------------------------------- | ------------------------------------ |
+| `full` (default) | The typed scientific tools in the table above                         | Hosted models, complex requests      |
+| `guided`         | The small flat session tools below, plus file listing and artifacts   | Local models with small context      |
+| `all`            | Both                                                                  | Hosted models that also want Guess   |
+
+The `guided` tool definitions total about 7,000 characters with no nested unions
+(the `full` profile is about 38,000), every result is text-only JSON with a
+`next_steps` list, and fit quality is reported as a verdict with issues and
+suggested actions rather than as a plot.
+
+## Guided analysis (session tools)
+
+| Tool                       | Purpose                                                              |
+| -------------------------- | -------------------------------------------------------------------- |
+| `run-sans-guided-analysis` | The fixed procedure: load, suggest models, fit the top ones, rank    |
+| `start-sans-analysis`      | Load one file or example into a session and describe the curve shape |
+| `suggest-sans-models`      | Rank models against the Sassafras curve library ("Guess")            |
+| `fit-sans-suggestions`     | Fit the top suggestions, simple baselines and any `extra_models`     |
+| `use-sans-candidate`       | Switch to another fitted candidate                                   |
+| `set-sans-model`           | Set the model by exact name, with an optional structure factor       |
+| `set-sans-parameter`       | Change one parameter's value, bounds or vary flag                    |
+| `set-sans-polydispersity`  | Give one size parameter a distribution                               |
+| `set-sans-q-range`         | Restrict or reset the fitted Q range                                 |
+| `run-sans-fit`             | Fit and return statistics, a verdict, issues and suggestions         |
+| `get-sans-analysis`        | Show the session's model, parameters and last fit                    |
+| `export-sans-analysis`     | Write `report.md`, `analysis.json`, SasView parameters and the plot  |
+
+A session is a directory under `SANS_PILOT_RUNS_DIR/sessions/<user>/` holding
+the data and an IQuana analysis file (`IQuana.save_analysis`). Each call
+reloads it, changes one thing and saves it, so sessions survive restarts and
+`analysis.json` reopens directly in IQuana. Sessions are atomic models with an
+optional structure factor; use `fit-sans-model` for composite models.
+
+### The fixed procedure
+
+`run-sans-guided-analysis` makes no model-side decisions:
+
+1. Load the data and describe its shape in numbers (low-Q slope, Guinier Rg,
+   background level, interference peak).
+2. Rank models with **Guess** from [Sassafras](https://github.com/SasView/sassafras):
+   the curve is matched, on shape only, against about 1.3 million simulated
+   curves and the closest curves supply starting values.
+3. Fit the top `top` suggestions (default 3) with IQuana from those starting
+   values, plus one or two plain shapes chosen from the low-Q slope
+   (`include_baselines`, default on) and any `extra_models`.
+4. Rank the fits by BIC, which penalises extra free parameters, mark
+   candidates the data cannot separate as `close_to_best`, and keep the best
+   one in the session for refinement.
+
+Automatic fits vary the structural parameters, `scale` and `background`
+within a factor of four of the starting value; SLDs, solvent conditions and
+orientation angles stay fixed. Each candidate's iterations are capped from the
+measured cost of one curve (a budget of about 20 s per method), so a slow model
+cannot stall the procedure; capped candidates are flagged.
+
+The library tends to rank flexible many-parameter models first because they
+can imitate simpler shapes; the baselines and the BIC ranking are there to
+counter that. A low chi-squared means a model *can* describe the curve, not
+that it is the right description of the sample.
+
+Guess is optional:
+
+```bash
+pip install "sans-pilot[guess]"
+python -m sassafras.library fetch      # curve library, ~290 MB, once
+```
+
+Without it, `fit-sans-suggestions` asks for `extra_models` and fits those from
+the model defaults. `SANS_PILOT_GUESS=off` disables it explicitly.
+
+### Diagnostics
+
+The verdict is a heuristic computed from IQuana's fit result: `good` (reduced
+chi-squared <= 2 and no systematic residuals), `acceptable` (<= 5), `poor`,
+or `uncalibrated` when the data has no dI. Issues cover parameters resting on
+a bound, |correlation| >= 0.95, standard errors above half the value, and
+systematic residuals (runs test) located at low, intermediate or high Q. The
+thresholds are returned by `get-sans-analysis` and printed in every report.
+
+## Local LLM runner
+
+`sans-pilot-agent` runs the fixed procedure for one file and optionally lets a
+model on any OpenAI-compatible endpoint refine the result:
+
+```bash
+# Deterministic only: no language model involved
+sans-pilot-agent data.csv
+
+# Refined and interpreted by a local model (Ollama shown; LM Studio serves
+# the same API on http://localhost:1234/v1)
+sans-pilot-agent data.csv \
+  --model <model-name> --base-url http://localhost:11434/v1 \
+  --sample "SDS micelles in D2O, 2 wt%, charged"
+```
+
+The runner owns loading, the guided procedure and the export. The model is
+given only the refinement tools and a fixed step budget (`--max-steps`,
+default 12): it may switch candidate, fit a model the sample suggests, adjust
+parameters and refit, then write an interpretation. Whatever the model does,
+the output folder (`<data>_analysis/` by default) receives:
+
+- `report.md` - data summary, models tried, fit report, diagnostics, steps
+  taken and, clearly marked as unverified, the model's interpretation;
+- `analysis.json` - reloadable with `IQuana.load_analysis`;
+- `analysis_guided.json` - the state before the model's turn, with a warning
+  in the report if the refinement made the fit worse;
+- `fit_plot.png`, `sasview_parameter_values.txt`, `guided_result.json` and
+  `transcript.json`.
+
+Malformed tool arguments, unknown tools and tool calls printed as text are
+handled; an endpoint that rejects tool definitions falls back to
+interpretation only, and an unreachable endpoint still yields the
+deterministic report. `--sample` matters: it is the only knowledge of the
+sample the model has. Tool definitions and the guided result need roughly
+3,000 tokens of context before the conversation starts, so raise the context
+length of runtimes that default lower.
+
+Any MCP client can use the same tools without the runner:
+
+```bash
+SANS_PILOT_TOOLS=guided UPLOAD_DIR=/path/to/data sans-pilot
+```
+
 ## Data pipeline
 
 All data tools use a typed `pipeline`. The primary source may be a user upload,
@@ -276,6 +404,9 @@ loading. 2D SANS and SESANS are rejected with actionable messages.
 | `SANS_PILOT_MAX_WORKERS`          | `2`                    | Maximum concurrent scientific worker processes                     |
 | `SANS_PILOT_TOOL_TIMEOUT_SECONDS` | `1800`                 | Hard execution timeout per worker; `0` disables it                  |
 | `API_TOKEN`                       | unset                  | Optional bearer token                                              |
+| `SANS_PILOT_TOOLS`                | `full`                 | Tool profile: `full`, `guided`, or `all`                           |
+| `SANS_PILOT_GUESS`                | unset                  | Set to `off` to disable Sassafras model suggestions                |
+| `SASSAFRAS_DATA`                  | per-user data folder   | Where the Sassafras curve library is stored                        |
 
 Artifact manifests are stored under `SANS_PILOT_RUNS_DIR/.registry`. When the
 runs directory is persistent and shared by all replicas, earlier artifacts can

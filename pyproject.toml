@@ -7,6 +7,7 @@ requires-python = ">=3.10"
 dependencies = [
     "anyio>=4.0",
     "fastmcp>=3.0.0b1",
+    "httpx>=0.27",
     "iquana==0.6.0",
     "bumps==1.0.3",
     "kaleido>=1.2.0",
@@ -16,6 +17,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Model suggestions ("Guess") from the Sassafras curve library.
+guess = [
+    "sassafras>=0.7",
+]
 dev = [
 	"ruff>=0.14.10",
     "pyright>=1.1.408",
@@ -24,6 +29,7 @@ dev = [
 
 [project.scripts]
 sans-pilot = "sans_pilot.main:main"
+sans-pilot-agent = "sans_pilot.agent:main"
 
 [tool.ruff]
 target-version = "py312"
