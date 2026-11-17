@@ -55,6 +55,8 @@
   compared with one fitted size distribution, like the kept fit.
 - Switching to a candidate that fits much worse is warned about, and reports
   flag such a switch and interpretations that describe an earlier model.
+- Points with zero, negative or missing dI are excluded when data is loaded
+  (and reported), instead of making every fit fail.
 - Fixed polydispersity attached by the curve library is removed when the fit
   is better without it.
 - Warnings from discarded trial fits no longer appear in results.

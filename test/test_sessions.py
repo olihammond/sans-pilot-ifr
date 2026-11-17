@@ -866,3 +866,39 @@ def test_switching_to_a_much_worse_candidate_is_warned_about(workspace):
   assert worst["reduced_chisq"] > 2 * best["reduced_chisq"]
   assert "fits the data much worse" in switched["warning"]
   assert "warning" not in procedure.use_candidate(session_id, None, best["model"])
+
+
+def test_points_with_zero_uncertainty_are_excluded_not_fatal(workspace):
+  import numpy as np
+
+  data = examples.simulate(
+    "sphere", seed=3, npoints=100, qmin=0.005, qmax=0.3, radius=50, scale=0.05
+  )
+  dy = np.asarray(data.dy, dtype=float).copy()
+  dy[-1] = 0.0
+  dy[10] = -1.0
+  np.savetxt(
+    workspace / "uploads" / "zero_di.csv",
+    np.c_[data.x, data.y, dy],
+    delimiter=",",
+    header="Q,I,dI",
+    comments="",
+  )
+
+  result = procedure.guided_analysis(
+    "zero_di.csv", None, None, 1, "sphere", None, None, False
+  )
+
+  assert result["status"] == "fitted"
+  assert result["data"]["points_active"] == 98
+  assert any("2 point(s) with zero or missing" in w for w in result["warnings"])
+  sphere = next(c for c in result["candidates"] if c["model"] == "sphere")
+  assert sphere["fitted"]["radius"] == pytest.approx(50.0, rel=0.03)
+
+  sessions.export_session(
+    result["session_id"], None, workspace / "export", include_plot=False
+  )
+  report = (workspace / "export" / "report.md").read_text(encoding="utf-8")
+  assert "2 point(s) with zero or missing intensity uncertainty" in report
+  page = (workspace / "export" / "report.html").read_text(encoding="utf-8")
+  assert "zero or missing intensity uncertainty" in page

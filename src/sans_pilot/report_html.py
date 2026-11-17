@@ -229,6 +229,14 @@ def build_html_report(
     "</div>",
   ]
 
+  if data.get("excluded_points_without_dI"):
+    from sans_pilot.sessions import dropped_points_note
+
+    parts.append(
+      "<div class=note>"
+      + _e(dropped_points_note(data["excluded_points_without_dI"]))
+      + "</div>"
+    )
   restricted = meta.get("q_range") or {}
   if restricted.get("q_min") is not None or restricted.get("q_max") is not None:
     parts.append(

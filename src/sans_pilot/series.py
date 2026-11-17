@@ -51,7 +51,14 @@ from sans_pilot.procedure import (
 )
 from sans_pilot.runtime import render_runtime
 from sans_pilot.schemas import UploadDataSource
-from sans_pilot.sessions import SessionError, _number, quiet_science, time_limit
+from sans_pilot.sessions import (
+  SessionError,
+  _number,
+  drop_points_without_uncertainty,
+  dropped_points_note,
+  quiet_science,
+  time_limit,
+)
 
 MAX_SERIES_FILES = 12
 SERIES_FIT_SECONDS = 30.0
@@ -449,12 +456,15 @@ def series_analysis(
       loaded = load_data_source(
         UploadDataSource(kind="upload", file=name), user_id=user_id
       )
-      if not inspect_data(loaded.data)["has_intensity_errors"]:
+      data, dropped = drop_points_without_uncertainty(loaded.data)
+      if dropped:
+        warnings_out.append(f"{name}: " + dropped_points_note(dropped))
+      if not inspect_data(data)["has_intensity_errors"]:
         raise SessionError(
           f"'{name}' has no intensity uncertainties; a joint fit needs dI to "
           "weight the curves against each other."
         )
-      datasets.append(loaded.data)
+      datasets.append(data)
       labels.append(str(loaded.provenance.get("file_name") or name))
 
   signal = [_signal_to_noise(data) for data in datasets]

@@ -205,6 +205,52 @@ def quiet_science(collected: list[str] | None = None) -> Iterator[None]:
     collected.extend(str(item.message) for item in captured)
 
 
+def drop_points_without_uncertainty(data: Any) -> tuple[Any, list[float]]:
+  """Remove points whose dI is zero, negative or missing.
+
+  BUMPS weights each point by 1/dI and refuses a dataset in which any point
+  cannot be weighted, so a single bad dI makes every fit fail.  Such points
+  carry no usable weight and are removed; their Q values are returned so the
+  removal can be reported.  Data with no usable dI at all is left alone (it
+  is fitted with |I| weighting instead).
+  """
+  dy = getattr(data, "dy", None)
+  if dy is None:
+    return data, []
+  dy = np.asarray(dy, dtype=float)
+  usable = np.isfinite(dy) & (dy > 0)
+  if usable.all() or not usable.any():
+    return data, []
+  x = np.asarray(data.x, dtype=float)
+  arrays: dict[str, Any] = {}
+  for name in _DATA_ARRAYS:
+    values = getattr(data, name, None)
+    if values is None:
+      continue
+    values = np.asarray(values, dtype=float)
+    arrays[name] = values[usable] if values.shape == usable.shape else None
+  cleaned = Data1D(
+    x=arrays["x"], y=arrays["y"], dy=arrays.get("dy"), dx=arrays.get("dx")
+  )
+  for name in ("dxl", "dxw"):
+    if arrays.get(name) is not None:
+      setattr(cleaned, name, arrays[name])
+  for name in ("filename", "title", "_xunit", "_yunit"):
+    if hasattr(data, name):
+      setattr(cleaned, name, getattr(data, name))
+  return cleaned, [float(value) for value in x[~usable]]
+
+
+def dropped_points_note(dropped: list[float]) -> str:
+  shown = ", ".join(f"{value:.4g}" for value in dropped[:5])
+  more = f" and {len(dropped) - 5} more" if len(dropped) > 5 else ""
+  return (
+    f"{len(dropped)} point(s) with zero or missing intensity uncertainty (dI) "
+    f"were excluded, at Q = {shown}{more} Å⁻¹. Such points cannot be weighted "
+    "in a fit; check them in the reduction."
+  )
+
+
 def _dump_data(data: Any, path: Path) -> None:
   payload: dict[str, Any] = {
     "name": str(getattr(data, "filename", "") or getattr(data, "title", "") or ""),
@@ -433,15 +479,20 @@ def create_session(
   notes: list[str] = []
   with quiet_science(notes):
     loaded = load_data_source(source, user_id=user_id)
+  data, dropped = drop_points_without_uncertainty(loaded.data)
+  if dropped:
+    notes.append(dropped_points_note(dropped))
 
   session_id = f"s-{uuid.uuid4().hex[:8]}"
   directory = sessions_root(user_id) / session_id
   directory.mkdir(parents=True, exist_ok=False)
   session = Session(id=session_id, directory=directory)
-  _dump_data(loaded.data, session.data_path)
+  _dump_data(data, session.data_path)
 
-  info = inspect_data(loaded.data)
-  features = describe_features(loaded.data)
+  info = inspect_data(data)
+  if dropped:
+    info["excluded_points_without_dI"] = dropped
+  features = describe_features(data)
   session.meta = {
     "version": SESSION_VERSION,
     "id": session_id,
@@ -872,6 +923,8 @@ def report_markdown(session: Session, fitter: IQuana | None) -> str:
     f"- Session: `{session.id}`",
     f"- Points fitted: {data.get('points_active')} of {data.get('points_total')}",
   ]
+  if data.get("excluded_points_without_dI"):
+    lines.append(f"- {dropped_points_note(data['excluded_points_without_dI'])}")
   restricted = meta.get("q_range") or {}
   if restricted.get("q_min") is not None or restricted.get("q_max") is not None:
     lines.append(
