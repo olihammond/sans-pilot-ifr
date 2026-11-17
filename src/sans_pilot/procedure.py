@@ -26,12 +26,14 @@ from sans_pilot.diagnostics import (
   RUNS_Z_SYSTEMATIC,
   active_arrays,
   baseline_models,
+  scale_limit,
 )
 from sans_pilot.guess import CAUTION, GuessUnavailable, guess_status, suggest_models
 from sans_pilot.sessions import (
   Session,
   SessionError,
   _next_steps,
+  apply_scale_cap,
   create_session,
   data_summary,
   default_free_parameters,
@@ -254,6 +256,11 @@ def _solve_scale_background(fitter: IQuana, keep_bounds: bool = False) -> None:
     design, arrays["i"][finite] * weight[finite], rcond=None
   )
   if math.isfinite(scale) and scale > 0 and math.isfinite(background):
+    high = fitter.params["scale"].get("max")
+    if high is not None and math.isfinite(float(high)) and scale > float(high):
+      # The solve wants more intensity than the upper bound allows (the
+      # volume-fraction cap): stay at the bound.
+      scale = float(high)
     values = {"scale": float(scale), "background": float(background)}
     for name, value in values.items():
       row = fitter.params[name]
@@ -360,9 +367,20 @@ def _configure_candidate(
     else:
       continue
     low, high = max(low, hard_low), min(high, hard_high)
+    if name == "scale":
+      cap = scale_limit(expression)
+      if cap is not None:
+        high = min(high, cap)
+      value = min(value, high)
+      low = min(low, value / 10.0)
+      if not low < high:
+        continue
+      fitter.set_param(name, value=value, min=low, max=high, vary=True)
+      continue
     if not low < value < high:
       continue
     fitter.set_param(name, min=low, max=high, vary=True)
+  apply_scale_cap(fitter, expression)
   return notes
 
 
@@ -614,7 +632,7 @@ def _fit_candidate(
       )
       if spread_note:
         procedure_notes.append(spread_note)
-      summary = summarize_fit(fitter, fit_result)
+      summary = summarize_fit(fitter, fit_result, None, expression)
       if procedure_notes:
         candidate["procedure_notes"] = procedure_notes
   except Exception as exc:

@@ -142,6 +142,19 @@ the best fit is kept. The library's polydispersity comes from a coarse scan
 and is held fixed, so these restarts are monodisperse; candidates report
 `starts_tried` and `improved_by_restart`.
 
+### The scale limit
+
+For models whose intensity is absolute (the form factor has both volume and
+SLD parameters: sphere, cylinder, ellipsoid, vesicle, ...), `scale` is the
+volume fraction, so guided and series fits keep it at or below 1. A fit that
+presses against the limit is reported as such: the data is probably not in
+cm⁻¹, the SLDs are wrong, or the model is wrong. Shape-independent models
+(polymer chains such as `poly_gauss_coil`, `mono_gauss_coil`,
+`polymer_excl_volume`, `star_polymer` and `rpa`, fractals, peaks, power laws,
+Guinier) use `scale` as a free prefactor and are not limited. For data in
+arbitrary units, raise the limit with `SANS_PILOT_SCALE_MAX`. The typed
+`fit-sans-model` tool uses the bounds given in the request.
+
 ### Series of curves
 
 Curves from the same particles (a contrast series, a concentration series,
@@ -509,6 +522,7 @@ loading. 2D SANS and SESANS are rejected with actionable messages.
 | `API_TOKEN`                       | unset                  | Optional bearer token                                              |
 | `SANS_PILOT_TOOLS`                | `full`                 | Tool profile: `full`, `guided`, or `all`                           |
 | `SANS_PILOT_GUESS`                | unset                  | Set to `off` to disable Sassafras model suggestions                |
+| `SANS_PILOT_SCALE_MAX`            | `1`                    | Upper limit for `scale` where it is a volume fraction (see below)  |
 | `SASSAFRAS_DATA`                  | per-user data folder   | Where the Sassafras curve library is stored                        |
 
 Artifact manifests are stored under `SANS_PILOT_RUNS_DIR/.registry`. When the

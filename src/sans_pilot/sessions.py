@@ -45,6 +45,7 @@ from sans_pilot.diagnostics import (
   describe_features,
   is_undetermined,
   residual_diagnostics,
+  scale_limit,
 )
 from sans_pilot.runtime import render_runtime, scientific_runtime
 from sans_pilot.schemas import ExampleDataSource, UploadDataSource
@@ -470,6 +471,23 @@ def create_session(
   }
 
 
+def apply_scale_cap(fitter: IQuana, expression: str) -> None:
+  """Keep ``scale`` at or below its limit when it is a volume fraction."""
+  cap = scale_limit(expression)
+  if cap is None or "scale" not in fitter.params:
+    return
+  row = fitter.params["scale"]
+  value = float(row.get("value") or 0.0)
+  high = row.get("max")
+  high = (
+    cap if high is None or not math.isfinite(float(high)) else min(float(high), cap)
+  )
+  value = min(value, high)
+  low = row.get("min")
+  low = None if low is None else min(float(low), value)
+  fitter.set_param("scale", value=value, min=low, max=high)
+
+
 def new_fitter(session: Session, model: str, structure_factor: str | None) -> IQuana:
   """Build a fitter on the session data with the session's Q range applied."""
   fitter = IQuana()
@@ -487,6 +505,7 @@ def new_fitter(session: Session, model: str, structure_factor: str | None) -> IQ
     # BUMPS cannot weight points without dI; |I| weighting (constant relative
     # error) is the stated substitute and matches the curve-library scoring.
     fitter.set_weighting("abs")
+  apply_scale_cap(fitter, f"{model}@{structure_factor}" if structure_factor else model)
   return fitter
 
 
@@ -581,6 +600,17 @@ def set_parameter(
   target = changes.get("value", current.get("value"))
   if low is not None and high is not None and float(low) > float(high):
     raise SessionError(f"min ({low}) is larger than max ({high}) for {name}.")
+  cap = scale_limit(model_expression(session)) if name == "scale" else None
+  if cap is not None:
+    if target is not None and float(target) > cap:
+      raise SessionError(
+        f"scale cannot exceed {cap:g} in {model_expression(session)}: there it "
+        "is a volume fraction for absolute intensities. A larger scale means the data is not in cm^-1, the SLDs "
+        "are wrong, or the model is wrong. Set SANS_PILOT_SCALE_MAX for data "
+        "in arbitrary units."
+      )
+    if high is not None and float(high) > cap:
+      changes["max"] = cap
   widened = False
   if target is not None and low is not None and float(target) < float(low):
     changes["min"], widened = float(target), True
@@ -700,6 +730,7 @@ def summarize_fit(
   fitter: IQuana,
   fit_result: dict[str, Any],
   conditional_on: list[str] | None = None,
+  expression: str | None = None,
 ) -> dict[str, Any]:
   """Reduce an IQuana fit result to statistics, parameters, and a verdict."""
   formatted = format_fit_result(fit_result)
@@ -752,6 +783,7 @@ def summarize_fit(
       residuals,
       has_uncertainties=has_uncertainties,
       conditional_on=conditional_on,
+      scale_cap=scale_limit(expression),
     ),
     "conditional_on": list(conditional_on or []),
     "residuals": residuals,
@@ -783,7 +815,9 @@ def run_fit(
       "method='amoeba', fix a poorly determined parameter, or narrow the bounds."
     ) from exc
   with quiet_science(notes):
-    summary = summarize_fit(fitter, fit_result, session.conditional())
+    summary = summarize_fit(
+      fitter, fit_result, session.conditional(), model_expression(session)
+    )
   save_fitter(session, fitter)
   session.meta["last_fit"] = summary
   session.mark_fitted()

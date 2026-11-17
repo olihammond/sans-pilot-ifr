@@ -8,6 +8,7 @@ looking at the fit.
 
 from __future__ import annotations
 
+import functools
 import math
 from typing import Any
 
@@ -35,6 +36,51 @@ THRESHOLDS: dict[str, Any] = {
 
 
 UNDETERMINED_STDERR = 1e7
+DEFAULT_SCALE_MAX = 1.0
+
+
+def scale_max() -> float:
+  """Upper limit for ``scale`` in every automatic and guided fit.
+
+  For data on an absolute scale with correct SLDs, ``scale`` is a volume
+  fraction and cannot exceed 1.  ``SANS_PILOT_SCALE_MAX`` raises the limit for
+  data in arbitrary units.
+  """
+  import os
+
+  try:
+    value = float(os.environ.get("SANS_PILOT_SCALE_MAX", DEFAULT_SCALE_MAX))
+  except ValueError:
+    return DEFAULT_SCALE_MAX
+  return value if math.isfinite(value) and value > 0 else DEFAULT_SCALE_MAX
+
+
+@functools.lru_cache(maxsize=256)
+def scale_is_volume_fraction(expression: str) -> bool:
+  """Return whether ``scale`` is a volume fraction for this model.
+
+  That holds when the form factor has both volume and SLD parameters, so its
+  intensity is absolute and normalised by particle volume.  For the
+  shape-independent models (polymer chains such as poly_gauss_coil or
+  polymer_excl_volume, fractals, peaks, power laws, Guinier) and models
+  without SLDs, ``scale`` is an arbitrary prefactor and may exceed 1.
+  """
+  form_factor = expression.partition("@")[0].strip()
+  try:
+    from sasmodels.core import load_model_info
+
+    parameters = load_model_info(form_factor).parameters.kernel_parameters
+  except Exception:
+    return False
+  kinds = {parameter.type for parameter in parameters}
+  return "volume" in kinds and "sld" in kinds
+
+
+def scale_limit(expression: str | None) -> float | None:
+  """The upper limit for ``scale`` in this model, or None when unlimited."""
+  if not expression or not scale_is_volume_fraction(expression):
+    return None
+  return scale_max()
 
 
 def is_undetermined(value: Any, stderr: Any) -> bool:
@@ -324,6 +370,7 @@ def assess_fit(
   *,
   has_uncertainties: bool,
   conditional_on: list[str] | None = None,
+  scale_cap: float | None = None,
 ) -> dict[str, Any]:
   """Turn fit statistics into a verdict, a list of issues, and next actions.
 
@@ -378,6 +425,19 @@ def assess_fit(
       on_bounds.append(f"{parts[0]}{side}")
     else:
       on_bounds.append(str(entry))
+  if scale_cap is not None and "scale (at its max)" in on_bounds:
+    on_bounds.remove("scale (at its max)")
+    issues.append(
+      f"scale is at its upper limit of {scale_cap:g}. For absolute intensities "
+      "scale is a volume fraction and cannot exceed this, so the model "
+      "intensity is too low for the data."
+    )
+    suggestions.append(
+      "Check the inputs rather than raising the limit: the data may not be on "
+      "an absolute scale (cm^-1), the SLDs may be wrong (supply known values "
+      "with fixed_parameters), or the model may be wrong. For data in "
+      "arbitrary units, set SANS_PILOT_SCALE_MAX."
+    )
   if on_bounds:
     names = ", ".join(item.split(" ")[0] for item in on_bounds)
     issues.append("Parameters resting on a bound: " + ", ".join(on_bounds) + ".")

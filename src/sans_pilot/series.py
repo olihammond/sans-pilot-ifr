@@ -33,6 +33,7 @@ from sans_pilot.diagnostics import (
   active_arrays,
   baseline_models,
   describe_features,
+  scale_limit,
 )
 from sans_pilot.guess import CAUTION, guess_status, suggest_models
 from sans_pilot.procedure import (
@@ -162,21 +163,33 @@ def _build(
     _solve_scale_background(fitter, keep_bounds=False)
     fitters.append(fitter)
 
+  cap = scale_limit(expression)
+  ceiling = math.inf if cap is None else cap
   share_scale = bool(per_file) and "scale" in fitters[0].params
   if share_scale:
     scales = [float(fitter.params["scale"]["value"]) for fitter in fitters]
     scale = float(np.median([value for value in scales if value > 0] or [1.0]))
+    scale = min(scale, ceiling)
     for fitter in fitters:
       fitter.set_param(
-        "scale", value=scale, min=scale / 100.0, max=scale * 100.0, vary=True
+        "scale",
+        value=scale,
+        min=scale / 100.0,
+        max=min(scale * 100.0, ceiling),
+        vary=True,
       )
       _resolve_background(fitter)
   else:
     for fitter in fitters:
       value = float(fitter.params["scale"]["value"])
       if value > 0:
+        value = min(value, ceiling)
         fitter.set_param(
-          "scale", value=value, min=value / 100.0, max=value * 100.0, vary=True
+          "scale",
+          value=value,
+          min=value / 100.0,
+          max=min(value * 100.0, ceiling),
+          vary=True,
         )
   for fitter in fitters:
     value = float(fitter.params["background"]["value"])

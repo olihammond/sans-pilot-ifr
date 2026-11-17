@@ -46,6 +46,10 @@
 - Changes made after a fit and not refitted are listed; reports show the last
   completed fit.
 - Each candidate fit has an iteration budget and a wall-clock limit.
+- Where `scale` is a volume fraction (form factors with volume and SLD
+  parameters), guided and series fits keep it at or below 1
+  (`SANS_PILOT_SCALE_MAX`) and explain a fit that reaches the limit.
+  Polymer, fractal, peak and other shape-independent models are exempt.
 
 ### Known limitations
 

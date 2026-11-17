@@ -609,3 +609,85 @@ def test_single_shell_counterpart_and_engine_check(workspace, monkeypatch):
   usable = calls[0]["usable"]
   assert usable("sphere") is True
   assert usable("not_a_model") is False
+
+
+def _upload_sphere(workspace, scale):
+  import numpy as np
+
+  data = examples.simulate(
+    "sphere", seed=3, npoints=100, qmin=0.005, qmax=0.3, radius=50, scale=scale
+  )
+  name = f"sphere_scale_{scale:g}.csv"
+  np.savetxt(
+    workspace / "uploads" / name,
+    np.c_[data.x, data.y, data.dy],
+    delimiter=",",
+    header="Q,I,dI",
+    comments="",
+  )
+  return name
+
+
+def test_scale_never_exceeds_one_and_the_cap_is_explained(workspace):
+  name = _upload_sphere(workspace, scale=5.0)
+  session_id = sessions.create_session(file=name, example=None, user_id=None)[
+    "session_id"
+  ]
+  result = procedure.fit_suggestions(session_id, None, 1, "sphere")
+  sphere = next(c for c in result["candidates"] if c["model"] == "sphere")
+  assert sphere["fitted"]["scale"] <= 1.0
+  issues = " ".join(result["selected_fit"]["diagnostics"]["issues"])
+  assert "scale is at its upper limit of 1" in issues
+
+  with pytest.raises(sessions.SessionError, match="scale cannot exceed 1"):
+    sessions.set_parameter(
+      session_id,
+      name="scale",
+      value=2.0,
+      minimum=None,
+      maximum=None,
+      vary=None,
+      user_id=None,
+    )
+  clipped = sessions.set_parameter(
+    session_id,
+    name="scale",
+    value=None,
+    minimum=None,
+    maximum=10.0,
+    vary=True,
+    user_id=None,
+  )
+  assert clipped["parameter"]["scale"]["max"] == 1.0
+
+
+def test_scale_limit_can_be_raised_for_arbitrary_units(workspace, monkeypatch):
+  monkeypatch.setenv("SANS_PILOT_SCALE_MAX", "100")
+  name = _upload_sphere(workspace, scale=5.0)
+  session_id = sessions.create_session(file=name, example=None, user_id=None)[
+    "session_id"
+  ]
+  result = procedure.fit_suggestions(session_id, None, 1, "sphere")
+  sphere = next(c for c in result["candidates"] if c["model"] == "sphere")
+  assert sphere["fitted"]["scale"] == pytest.approx(5.0, rel=0.1)
+  assert sphere["fitted"]["radius"] == pytest.approx(50.0, rel=0.05)
+
+
+def test_polymer_models_keep_an_unlimited_scale(workspace):
+  session_id = sessions.create_session(file=None, example="sphere", user_id=None)[
+    "session_id"
+  ]
+  sessions.set_model(
+    session_id, model="poly_gauss_coil", structure_factor=None, user_id=None
+  )
+  changed = sessions.set_parameter(
+    session_id,
+    name="scale",
+    value=25.0,
+    minimum=None,
+    maximum=1000.0,
+    vary=True,
+    user_id=None,
+  )
+  assert changed["parameter"]["scale"]["value"] == 25.0
+  assert changed["parameter"]["scale"]["max"] == 1000.0

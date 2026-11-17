@@ -188,3 +188,19 @@ def test_runner_series_mode_writes_reports_and_an_interpretation(contrast_series
   assert "## Interpretation by `summariser`" in report
   page = (tmp_path / "series_out" / "report.html").read_text(encoding="utf-8")
   assert "Interpretation by summariser" in page and "SANS-PILOT-EXTRA" not in page
+
+
+def test_joint_scale_respects_the_cap(contrast_series, monkeypatch):
+  tmp_path, names = contrast_series
+  monkeypatch.setenv("SANS_PILOT_SCALE_MAX", "0.01")
+  summary = series_analysis(
+    names,
+    None,
+    "sld_solvent=" + "/".join(str(value) for value in SOLVENTS),
+    None,
+    1,
+    "sphere",
+    tmp_path / "out",
+    include_plot=False,
+  )["summary"]
+  assert summary["selected_fit"]["shared"]["scale"]["value"] <= 0.01

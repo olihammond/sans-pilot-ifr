@@ -148,3 +148,57 @@ def test_a_curve_still_rolling_off_is_not_called_elongated():
   assert is_undetermined(1.0, 5.0) is False
   assert is_undetermined(245.0, 0.5) is False
   assert is_undetermined(0.63, 0.33) is False
+
+
+def test_scale_at_its_cap_gets_its_own_explanation(monkeypatch):
+  verdict = assess_fit(
+    {
+      "reduced_chisq": 40.0,
+      "on_bounds": [("scale", "max"), ("radius", "min")],
+      "parameters": {},
+    },
+    None,
+    has_uncertainties=True,
+    scale_cap=1.0,
+  )
+  text = " ".join(verdict["issues"])
+  assert "scale is at its upper limit of 1" in text
+  assert "Parameters resting on a bound: radius (at its min)." in text
+  assert any("absolute scale" in item for item in verdict["suggestions"])
+  assert not any("Widen the bounds of scale" in item for item in verdict["suggestions"])
+
+  monkeypatch.setenv("SANS_PILOT_SCALE_MAX", "50")
+  from sans_pilot.diagnostics import scale_max
+
+  assert scale_max() == 50.0
+  monkeypatch.setenv("SANS_PILOT_SCALE_MAX", "nonsense")
+  assert scale_max() == 1.0
+
+
+def test_only_volume_normalised_models_have_a_scale_limit():
+  from sans_pilot.diagnostics import scale_is_volume_fraction, scale_limit
+
+  for model in ("sphere", "cylinder", "ellipsoid", "vesicle", "sphere@hayter_msa"):
+    assert scale_is_volume_fraction(model), model
+  for model in (
+    "poly_gauss_coil",
+    "mono_gauss_coil",
+    "polymer_excl_volume",
+    "star_polymer",
+    "rpa",
+    "mass_fractal",
+    "power_law",
+    "guinier",
+    "not_a_model",
+  ):
+    assert not scale_is_volume_fraction(model), model
+  assert scale_limit("sphere") == 1.0
+  assert scale_limit("poly_gauss_coil") is None
+  assert scale_limit(None) is None
+
+  unlimited = assess_fit(
+    {"reduced_chisq": 1.0, "on_bounds": [("scale", "max")], "parameters": {}},
+    None,
+    has_uncertainties=True,
+  )
+  assert "Parameters resting on a bound: scale (at its max)." in unlimited["issues"]
