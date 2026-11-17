@@ -126,3 +126,25 @@ def test_markdown_subset_renders_tables_lists_and_escapes_html():
   assert "&lt;b&gt;cylinder&lt;/b&gt;" in page
   assert "<th>Parameter</th>" in page and "<td>18.6</td>" in page
   assert page.count("<li>") == 2 and "<b>0.84</b>" in page
+
+
+def test_a_curve_still_rolling_off_is_not_called_elongated():
+  from iquana import examples
+
+  from sans_pilot.diagnostics import baseline_models, is_undetermined
+
+  data = examples.simulate(
+    "vesicle", seed=3, npoints=130, qmin=0.003, qmax=0.4, radius=245.0, thickness=37.0
+  )
+  features = describe_features(data)
+
+  assert -1.5 < features["low_q_log_slope"] <= -0.3
+  assert any("rolling off" in hint for hint in features["hints"])
+  assert not any("elongated" in hint for hint in features["hints"])
+  assert baseline_models(features) == ["sphere", "ellipsoid"]
+
+  assert is_undetermined(6.09, 1e8) is True
+  assert is_undetermined(1.0, 50.0) is True
+  assert is_undetermined(1.0, 5.0) is False
+  assert is_undetermined(245.0, 0.5) is False
+  assert is_undetermined(0.63, 0.33) is False

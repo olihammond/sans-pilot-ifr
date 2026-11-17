@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import os
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -134,8 +135,13 @@ def suggest_models(
   top: int = 5,
   starting_values: int = 3,
   also: list[tuple[str, str | None]] | None = None,
+  usable: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
   """Rank models for a dataset and attach starting values to the best few.
+
+  ``usable`` is asked, before any starting values are computed, whether a
+  model expression can be fitted downstream; rejected models are marked not
+  loadable so they do not take up one of the ``starting_values`` slots.
 
   Returns ``suggestions`` best first.  Each carries the library score
   (``library_chisq_n``, the chi-squared per point of its closest library curve
@@ -178,7 +184,10 @@ def suggest_models(
     }
     if entry.get("reason"):
       suggestion["note"] = entry["reason"]
-    if entry["loadable"] and with_values < starting_values:
+    if suggestion["loadable"] and usable is not None and not usable(entry["model"]):
+      suggestion["loadable"] = False
+      suggestion["note"] = "this model cannot be set up by the fitting engine"
+    if suggestion["loadable"] and with_values < starting_values:
       with_values += 1
       try:
         values = guesser.starting_values(

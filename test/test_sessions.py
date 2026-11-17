@@ -172,7 +172,7 @@ def test_library_suggestions_supply_starting_values_and_ranking(workspace, monke
   radius = examples.get_example("sphere").params["radius"]["value"]
   calls: dict[str, int] = {}
 
-  def fake_suggest(data, *, top, starting_values, also):
+  def fake_suggest(data, *, top, starting_values, also, usable=None):
     calls.update(top=top, starting_values=starting_values, also=also)
     return {
       "requested": [
@@ -223,7 +223,7 @@ def test_library_suggestions_supply_starting_values_and_ranking(workspace, monke
     None, "sphere", None, 2, None, None, None, include_baselines=False
   )
 
-  assert calls == {"top": 5, "starting_values": 2, "also": []}
+  assert calls == {"top": 8, "starting_values": 2, "also": []}
   assert result["status"] == "fitted"
   models = [item["model"] for item in result["candidates"]]
   assert sorted(models) == ["ellipsoid", "sphere"]
@@ -276,7 +276,7 @@ def test_simple_baselines_are_fitted_alongside_library_suggestions(
   radius = examples.get_example("sphere").params["radius"]["value"]
   seen: dict[str, list] = {}
 
-  def fake_suggest(data, *, top, starting_values, also):
+  def fake_suggest(data, *, top, starting_values, also, usable=None):
     seen["also"] = also
     return {
       "suggestions": [
@@ -483,3 +483,129 @@ def test_extra_models_are_fitted_without_refitting_existing_candidates(
   sessions.set_q_range(session_id, q_min=0.005, q_max=None, user_id=None)
   procedure.fit_suggestions(session_id, None, 1, "sphere")
   assert fitted == ["sphere"]
+
+
+def test_fixing_an_undetermined_parameter_is_not_treated_as_hiding_anything(workspace):
+  session_id = sessions.create_session(file=None, example="sphere", user_id=None)[
+    "session_id"
+  ]
+  session = sessions.load_session(session_id, user_id=None)
+  session.meta["last_fit"] = {
+    "fitted": {
+      "thick_solvent": {"value": 6.09, "stderr": 1e8},
+      "radius": {"value": 245.0, "stderr": 0.5},
+    }
+  }
+
+  quiet = sessions._track_conditional(session, "thick_solvent", value=0.0, vary=False)
+  loud = sessions._track_conditional(session, "radius", value=245.2, vary=False)
+
+  assert quiet is None
+  assert session.meta["fixed_after_fit"]["thick_solvent"]["undetermined"] is True
+  assert "fixed at the value the last fit gave it" in (loud or "")
+  assert session.meta["conditional_on"] == ["radius"]
+
+
+def test_parameters_that_only_rescale_the_intensity_are_not_fitted(workspace):
+  import numpy as np
+  from iquana import examples as iquana_examples
+
+  data = iquana_examples.simulate(
+    "vesicle", seed=5, npoints=120, qmin=0.004, qmax=0.3, radius=200.0, thickness=30.0
+  )
+  path = workspace / "uploads" / "vesicle.csv"
+  np.savetxt(
+    path, np.c_[data.x, data.y, data.dy], delimiter=",", header="Q,I,dI", comments=""
+  )
+  session_id = sessions.create_session(file="vesicle.csv", example=None, user_id=None)[
+    "session_id"
+  ]
+
+  result = procedure.fit_suggestions(session_id, None, 1, "vesicle")
+  candidate = result["candidates"][0]
+
+  assert "volfraction" not in candidate["fitted"]
+  assert "scale" in candidate["fitted"]
+  assert any(
+    "only rescales the intensity" in note for note in candidate["procedure_notes"]
+  )
+  issues = " ".join(result["selected_fit"]["diagnostics"]["issues"])
+  assert "scale & volfraction" not in issues
+  exported = sessions.export_session(
+    session_id, None, workspace / "export", include_plot=False
+  )
+  report = exported["artifacts"]["report.md"].read_text(encoding="utf-8")
+  assert "Notes from the automatic procedure" in report
+
+
+def test_scale_degeneracy_is_read_from_the_covariance():
+  import numpy as np
+
+  cov = np.array([[1.0, -0.9999, 0.2], [-0.9999, 1.0, 0.1], [0.2, 0.1, 1.0]])
+  labels = ["scale", "volfraction", "radius"]
+  assert procedure._degenerate_with_scale({"cov": cov, "cov_labels": labels}) == [
+    "volfraction"
+  ]
+  assert procedure._degenerate_with_scale({"cov": cov, "cov_labels": labels[1:]}) == []
+  assert procedure._degenerate_with_scale({}) == []
+
+
+def test_single_shell_counterpart_and_engine_check(workspace, monkeypatch):
+  calls: list[dict] = []
+
+  def fake_suggest(data, *, top, starting_values, also, usable=None):
+    calls.append({"also": also, "usable": usable})
+    if usable is None:  # the follow-up request for an unusable model's counterpart
+      return {
+        "suggestions": [],
+        "requested": [
+          {"model": model, "structure_factor": sf, "expression": model}
+          for model, sf in also
+        ],
+      }
+    return {
+      "suggestions": [
+        {
+          "model": "multilayer_vesicle",
+          "structure_factor": None,
+          "expression": "multilayer_vesicle",
+          "library_chisq_n": 1.0,
+          "loadable": True,
+          "start": {
+            "parameters": {"n_shells": 1.2, "radius": 400.0, "thick_shell": 30.0},
+            "polydispersity": {"thick_shell": {"width": 0.1, "distribution": "schulz"}},
+          },
+        },
+        {
+          "model": "onion",
+          "structure_factor": None,
+          "expression": "onion",
+          "library_chisq_n": 2.0,
+          "loadable": False,
+        },
+      ],
+      "requested": [],
+    }
+
+  monkeypatch.setattr(procedure, "guess_status", lambda: {"available": True})
+  monkeypatch.setattr(procedure, "suggest_models", fake_suggest)
+  session_id = sessions.create_session(file=None, example="sphere", user_id=None)[
+    "session_id"
+  ]
+
+  result = procedure.fit_suggestions(session_id, None, 1, None, include_baselines=False)
+
+  # The unusable onion's counterpart is requested from the library; the
+  # vesicle starts from the multi-shell values with names translated.
+  assert calls[1]["also"] == [("core_shell_sphere", None)]
+  origins = {item["model"]: item["origin"] for item in result["candidates"]}
+  assert origins == {
+    "multilayer_vesicle": "curve library",
+    "vesicle": "single-shell counterpart",
+    "core_shell_sphere": "single-shell counterpart",
+  }
+  vesicle = next(c for c in result["candidates"] if c["model"] == "vesicle")
+  assert vesicle["started_from"] == "curve library"
+  usable = calls[0]["usable"]
+  assert usable("sphere") is True
+  assert usable("not_a_model") is False

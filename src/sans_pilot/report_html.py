@@ -263,10 +263,13 @@ def build_html_report(
           [
             _e(key),
             _num(entry.get("value"), 5),
-            _num(entry.get("stderr"), 3),
+            "undetermined"
+            if entry.get("undetermined")
+            else _num(entry.get("stderr"), 3),
             (
               _num(100 * abs(entry["stderr"] / entry["value"]), 2) + " %"
-              if isinstance(entry.get("stderr"), (int, float))
+              if not entry.get("undetermined")
+              and isinstance(entry.get("stderr"), (int, float))
               and isinstance(entry.get("value"), (int, float))
               and entry["value"]
               else "–"
@@ -286,6 +289,9 @@ def build_html_report(
         )
         + "</details>"
       )
+    notes = (meta.get("procedure_notes") or {}).get(model or "")
+    if notes:
+      parts.append("<div class=note>" + _list(notes) + "</div>")
     fixed_later = meta.get("fixed_after_fit") or {}
     if fixed_later:
       parts.append(
@@ -296,8 +302,12 @@ def build_html_report(
             [
               _e(key),
               _num(entry.get("value"), 6),
-              f"{_num(entry.get('fitted_value'), 6)} ± "
-              f"{_num(entry.get('fitted_stderr'), 3)}",
+              f"{_num(entry.get('fitted_value'), 6)} "
+              + (
+                "(undetermined by the data)"
+                if entry.get("undetermined")
+                else f"± {_num(entry.get('fitted_stderr'), 3)}"
+              ),
             ]
             for key, entry in fixed_later.items()
           ],

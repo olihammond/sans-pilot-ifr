@@ -22,7 +22,11 @@ from iquana import IQuana
 
 from sans_pilot.analyses._fitting_helpers import filter_actionable_warnings
 from sans_pilot.artifacts import safe_path_component
-from sans_pilot.diagnostics import active_arrays, baseline_models
+from sans_pilot.diagnostics import (
+  RUNS_Z_SYSTEMATIC,
+  active_arrays,
+  baseline_models,
+)
 from sans_pilot.guess import CAUTION, GuessUnavailable, guess_status, suggest_models
 from sans_pilot.sessions import (
   Session,
@@ -31,6 +35,7 @@ from sans_pilot.sessions import (
   create_session,
   data_summary,
   default_free_parameters,
+  fit_residuals,
   load_session,
   model_expression,
   new_fitter,
@@ -51,6 +56,28 @@ EXTRA_STARTS = 6
 RESTART_SECONDS = 25.0
 RESTART_MAX_CURVE_SECONDS = 0.5
 DEFAULT_FIT_STEPS = 200
+DEGENERATE_CORRELATION = 0.999
+# A multi-shell model whose shell count is about one is fitted alongside its
+# single-shell counterpart: (parameter holding the count, simpler model).
+SINGLE_SHELL_COUNTERPART = {
+  "multilayer_vesicle": ("n_shells", "vesicle"),
+  "onion": ("n_shells", "core_shell_sphere"),
+  "core_multi_shell": ("n", "core_shell_sphere"),
+}
+# Parameter names of a multi-shell model translated to its counterpart's.
+COUNTERPART_PARAMETERS = {
+  "vesicle": {"thick_shell": "thickness"},
+  "core_shell_sphere": {
+    "radius_core": "radius",
+    "thickness1": "thickness",
+    "sld_out1": "sld_shell",
+    "sld1": "sld_shell",
+  },
+}
+# Parameters that multiply the intensity in most models: these are treated as
+# degenerate with the scale at a lower correlation than other parameters.
+PREFACTOR_NAMES = ("volfraction", "vol_frac")
+PREFACTOR_CORRELATION = 0.95
 LIMITED_FIT_STEPS = 30
 RANKING_NOTE = (
   "Ranked by BIC = chi-squared + n_free * ln(n_points), which penalises extra "
@@ -339,6 +366,138 @@ def _configure_candidate(
   return notes
 
 
+def _degenerate_with_scale(fit_result: dict[str, Any]) -> list[str]:
+  """Name free parameters whose effect is indistinguishable from the scale."""
+  labels = [str(label) for label in fit_result.get("cov_labels") or []]
+  cov = fit_result.get("cov")
+  if cov is None or "scale" not in labels:
+    return []
+  matrix = np.asarray(cov, dtype=float)
+  if matrix.shape != (len(labels), len(labels)):
+    return []
+  index = labels.index("scale")
+  names = []
+  for other, label in enumerate(labels):
+    if other == index or label == "background":
+      continue
+    denominator = math.sqrt(abs(matrix[index, index] * matrix[other, other]))
+    if not denominator:
+      continue
+    limit = (
+      PREFACTOR_CORRELATION
+      if label.startswith(PREFACTOR_NAMES)
+      else DEGENERATE_CORRELATION
+    )
+    if abs(matrix[index, other] / denominator) >= limit:
+      names.append(label)
+  return names
+
+
+def _resolve_scale_degeneracy(
+  fitter: IQuana,
+  fit_result: dict[str, Any],
+  initial: dict[str, float],
+  options: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+  """Hold parameters that only rescale the intensity, then refit.
+
+  A volume fraction that merely multiplies the curve cannot be separated from
+  ``scale``: freeing both gives each a huge, meaningless uncertainty.  Such
+  parameters go back to their starting value and stay fixed; only their
+  product with the scale is determined, and the report says so.
+  """
+  names = _degenerate_with_scale(fit_result)
+  if not names:
+    return fit_result, []
+  for name in names:
+    fitter.set_param(
+      name, value=initial.get(name, fitter.params[name]["value"]), vary=False
+    )
+  with time_limit(CANDIDATE_METHOD_SECONDS):
+    refit = fitter.fit(engine="bumps", method="lm", **options)
+  notes = [
+    f"{name} only rescales the intensity in this model, so it cannot be "
+    f"separated from scale. It is held at {fitter.params[name]['value']:.4g} "
+    "(its starting value); only the product with scale is determined."
+    for name in names
+  ]
+  return refit, notes
+
+
+def _bic(fit_result: dict[str, Any]) -> float:
+  chisq, free, points = (
+    fit_result.get("chisq"),
+    fit_result.get("n_free"),
+    fit_result.get("n_points"),
+  )
+  if (
+    not isinstance(chisq, (int, float))
+    or not isinstance(free, (int, float))
+    or not isinstance(points, (int, float))
+  ):
+    return math.inf
+  return float(chisq) + float(free) * math.log(max(float(points), 1.0))
+
+
+def _refine_polydispersity(
+  session: Session,
+  fitter: IQuana,
+  fit_result: dict[str, Any],
+  expression: str,
+) -> tuple[IQuana, dict[str, Any], str | None]:
+  """Let a size-distribution width vary when the residuals call for it.
+
+  The curve library only scans a few fixed widths.  If the best fit still has
+  systematic residuals, one width (an existing one, or a new 10% distribution
+  on the first free size) is fitted on a copy; the copy replaces the fit only
+  when BIC improves, so the extra parameter has to earn its place.
+  """
+  residuals, _ = fit_residuals(fitter)
+  if not residuals or (residuals.get("runs_z") or 0.0) >= RUNS_Z_SYSTEMATIC:
+    return fitter, fit_result, None
+  supported = [str(name) for name in fitter.get_polydisperse_parameters()]
+  free = {name for name, row in fitter.params.items() if row.get("vary")}
+  active = [
+    name
+    for name in supported
+    if fitter.is_polydispersity_enabled() and fitter.get_pd_param(name).get("pd")
+  ]
+  target = next(iter(active), None) or next(
+    (name for name in supported if name in free), None
+  )
+  if target is None:
+    return fitter, fit_result, None
+
+  path = session.directory / "_pd_trial.json"
+  try:
+    fitter.save_analysis(str(path))
+    trial = IQuana.load_analysis(str(path))
+    trial.enable_polydispersity(True)
+    current = trial.get_pd_param(target)
+    trial.set_pd_param(
+      target,
+      pd_width=float(current.get("pd") or 0.1),
+      pd_type=str(current.get("pd_type") or "gaussian"),
+      vary=True,
+    )
+    trial_options, _, _ = _fit_budget(trial)
+    with time_limit(CANDIDATE_METHOD_SECONDS):
+      trial_result = trial.fit(engine="bumps", method="lm", **trial_options)
+  except Exception:
+    return fitter, fit_result, None
+  finally:
+    path.unlink(missing_ok=True)
+  if _bic(trial_result) < _bic(fit_result) - 2.0:
+    width = float(trial.get_pd_param(target).get("pd") or 0.0)
+    return (
+      trial,
+      trial_result,
+      f"The polydispersity of {target} was fitted ({width:.3g} relative width) "
+      "because the residuals were systematic; BIC improved.",
+    )
+  return fitter, fit_result, None
+
+
 def _fit_budget(fitter: IQuana) -> tuple[dict[str, Any], float, int]:
   """Cap iterations from the measured cost of one curve.
 
@@ -377,6 +536,11 @@ def _fit_candidate(
     with quiet_science(warnings_out):
       fitter = new_fitter(session, model, structure_factor)
       notes = _configure_candidate(fitter, expression, start, fixed)
+      initial = {
+        str(name): float(row["value"])
+        for name, row in fitter.params.items()
+        if isinstance(row.get("value"), (int, float))
+      }
       # Library starts are already polished, so LM converges directly (simplex
       # is the fallback).  From model defaults, a simplex search runs first.
       methods = ("lm", "amoeba") if start is not None else ("amoeba", "lm")
@@ -438,7 +602,21 @@ def _fit_candidate(
             candidate["improved_by_restart"] = True
             candidate.pop("limited_iterations", None)
       candidate["starts_tried"] = restarts + 1
+
+      procedure_notes: list[str] = []
+      final_options, _, _ = _fit_budget(fitter)
+      fit_result, degenerate = _resolve_scale_degeneracy(
+        fitter, fit_result, initial, final_options
+      )
+      procedure_notes += degenerate
+      fitter, fit_result, spread_note = _refine_polydispersity(
+        session, fitter, fit_result, expression
+      )
+      if spread_note:
+        procedure_notes.append(spread_note)
       summary = summarize_fit(fitter, fit_result)
+      if procedure_notes:
+        candidate["procedure_notes"] = procedure_notes
   except Exception as exc:
     candidate["error"] = f"fit failed: {str(exc)[:200]}"
     return candidate
@@ -564,13 +742,76 @@ def fit_suggestions(
       else []
     )
     also = list(dict.fromkeys([*new_extras, *baselines[:MAX_BASELINES]]))
+
+    def usable(expression: str) -> bool:
+      """Check the fitting engine can set the model up and evaluate it."""
+      model, _, structure_factor = expression.partition("@")
+      try:
+        new_fitter(session, model, structure_factor or None).calculate()
+      except Exception:
+        return False
+      return True
+
+    data = _probe_data(session)
     with quiet_science():
       guess = suggest_models(
-        _probe_data(session),
-        top=1 if reuse else max(top, 5),
+        data,
+        top=1 if reuse else max(top, 5) + 3,
         starting_values=0 if reuse else top,
         also=also,
+        usable=usable,
       )
+      if not reuse:
+        # A multi-shell suggestion with about one shell is really its
+        # single-shell counterpart: fit that simpler model as well, starting
+        # from the multi-shell values.  If the engine cannot set the
+        # multi-shell model up at all, ask the library for the counterpart.
+        mapped: list[dict[str, Any]] = []
+        unknown: list[tuple[str, str | None]] = []
+        for item in guess["suggestions"]:
+          counter, alternative = SINGLE_SHELL_COUNTERPART.get(
+            item["model"], (None, None)
+          )
+          if not alternative:
+            continue
+          pair = (alternative, item["structure_factor"])
+          if pair in also or pair in unknown:
+            continue
+          if any(pair == (m["model"], m["structure_factor"]) for m in mapped):
+            continue
+          start = item.get("start")
+          if start is None:
+            if not item["loadable"] and not unknown:
+              unknown.append(pair)
+            continue
+          shells = start["parameters"].get(counter)
+          if not isinstance(shells, (int, float)) or shells >= 1.5:
+            continue
+          names = COUNTERPART_PARAMETERS.get(alternative, {})
+          mapped.append(
+            {
+              "model": alternative,
+              "structure_factor": item["structure_factor"],
+              "expression": _expression(alternative, item["structure_factor"]),
+              "origin": "single-shell counterpart",
+              "start": {
+                "parameters": {
+                  names.get(name, name): value
+                  for name, value in start["parameters"].items()
+                },
+                "polydispersity": {
+                  names.get(name, name): value
+                  for name, value in start["polydispersity"].items()
+                },
+              },
+            }
+          )
+        if unknown:
+          more = suggest_models(data, top=1, starting_values=0, also=unknown)
+          for entry in more.get("requested") or []:
+            entry["origin"] = "single-shell counterpart"
+          mapped += more.get("requested") or []
+        guess["requested"] = [*(guess.get("requested") or []), *mapped]
     if not reuse:
       session.meta["suggestions"] = guess["suggestions"]
       for item in guess["suggestions"]:
@@ -596,7 +837,8 @@ def fit_suggestions(
           "structure_factor": pair[1],
           "start": item.get("start"),
           "library_chisq_n": None,
-          "origin": "requested" if pair in extras else "simple baseline",
+          "origin": item.get("origin")
+          or ("requested" if pair in extras else "simple baseline"),
           "start_note": item.get("note"),
         }
       )
@@ -649,6 +891,15 @@ def fit_suggestions(
   )
   session.meta["candidate_summaries"] = summaries
   notes = [note for item in fitted_now for note in item.pop("_notes", [])]
+  procedure_notes = dict(session.meta.get("procedure_notes") or {}) if reuse else {}
+  procedure_notes.update(
+    {
+      item["model"]: item["procedure_notes"]
+      for item in fitted_now
+      if item.get("procedure_notes")
+    }
+  )
+  session.meta["procedure_notes"] = procedure_notes
   session.meta["candidates"] = candidates
   session.meta["candidates_context"] = context
   succeeded = [item for item in candidates if "error" not in item]

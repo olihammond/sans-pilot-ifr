@@ -43,6 +43,7 @@ from sans_pilot.diagnostics import (
   active_arrays,
   assess_fit,
   describe_features,
+  is_undetermined,
   residual_diagnostics,
 )
 from sans_pilot.runtime import render_runtime, scientific_runtime
@@ -351,11 +352,19 @@ def _track_conditional(
     return None
 
   fit_value, fit_error = previous.get("value"), previous.get("stderr")
+  undetermined = is_undetermined(fit_value, fit_error)
   record[name] = {
     "value": fit_value if value is None else value,
     "fitted_value": fit_value,
     "fitted_stderr": fit_error,
+    "undetermined": undetermined,
   }
+  if undetermined:
+    # The fit was insensitive to this parameter, so holding it anywhere
+    # reasonable neither changes the fit nor tightens the other uncertainties.
+    if name in conditional:
+      conditional.remove(name)
+    return None
   tolerance = 0.0
   if isinstance(fit_value, (int, float)):
     tolerance = 0.02 * abs(fit_value)
@@ -707,6 +716,8 @@ def summarize_fit(
         "value": _number(entry.get("value")),
         "stderr": _number(entry.get("stderr")),
       }
+      if is_undetermined(entry.get("value"), entry.get("stderr")):
+        fitted[name]["undetermined"] = True
   statistics = {
     key: _number(formatted.get(key))
     for key in (
@@ -897,11 +908,20 @@ def report_markdown(session: Session, fitter: IQuana | None) -> str:
         "| Parameter | Fixed at | Previously fitted |",
         "|---|---|---|",
         *[
-          f"| {name} | {entry['value']} | {entry['fitted_value']} ± "
-          f"{entry['fitted_stderr']} |"
+          f"| {name} | {entry['value']} | "
+          + (
+            f"{entry['fitted_value']} (undetermined by the data)"
+            if entry.get("undetermined")
+            else f"{entry['fitted_value']} ± {entry['fitted_stderr']}"
+          )
+          + " |"
           for name, entry in fixed_later.items()
         ],
       ]
+    notes = (meta.get("procedure_notes") or {}).get(model_expression(session) or "")
+    if notes:
+      lines += ["", "Notes from the automatic procedure:", ""]
+      lines += [f"- {note}" for note in notes]
     pending = meta.get("pending_changes") or []
     if pending:
       lines += [

@@ -34,6 +34,24 @@ THRESHOLDS: dict[str, Any] = {
 }
 
 
+UNDETERMINED_STDERR = 1e7
+
+
+def is_undetermined(value: Any, stderr: Any) -> bool:
+  """Return whether a fitted parameter is not constrained by the data at all.
+
+  IQuana reports a very large standard error when the fit is insensitive to a
+  parameter; an error ten times the value says the same thing.
+  """
+  if not isinstance(stderr, (int, float)) or not math.isfinite(stderr):
+    return False
+  if abs(stderr) >= UNDETERMINED_STDERR:
+    return True
+  return (
+    isinstance(value, (int, float)) and value != 0 and abs(stderr) > 10 * abs(value)
+  )
+
+
 def _round(value: float, digits: int = 4) -> float:
   """Round to significant digits so responses stay short."""
   if value == 0 or not math.isfinite(value):
@@ -156,7 +174,16 @@ def describe_features(data: Any) -> dict[str, Any]:
 
   hints: list[str] = []
   if low_slope is not None:
-    if low_slope > 0.3:
+    guinier = features["guinier"] or {}
+    rolling_off = guinier.get("points_used", 0) >= 8 and -1.5 < low_slope <= -0.3
+    if rolling_off:
+      hints.append(
+        "The curve is still rolling off towards a low-Q plateau that the Q "
+        f"range does not fully reach (Guinier Rg about "
+        f"{guinier['rg_angstrom']} Å): finite-sized particles. The "
+        "low-Q slope is not a reliable shape indicator here."
+      )
+    elif low_slope > 0.3:
       hints.append(
         "Intensity falls towards low Q (suppressed forward scattering): "
         "particles repel each other, so a structure factor is needed "
@@ -212,6 +239,9 @@ def baseline_models(features: dict[str, Any]) -> list[str]:
     return []
   if slope > 0.3:
     return ["sphere@hardsphere", "sphere@hayter_msa"]
+  guinier = features.get("guinier")
+  if guinier and guinier.get("points_used", 0) >= 8 and -1.5 < slope <= -0.3:
+    return ["sphere", "ellipsoid"]
   if slope > -0.3:
     models = ["sphere", "ellipsoid"]
   elif slope > -1.5:
@@ -375,14 +405,32 @@ def assess_fit(
 
   parameters = fit_result.get("parameters") or {}
   poorly: list[str] = []
+  undetermined: list[str] = []
   for name, entry in parameters.items():
     if not isinstance(entry, dict) or entry.get("fixed"):
       continue
     value, error = entry.get("value"), entry.get("stderr")
     if not isinstance(value, (int, float)) or not isinstance(error, (int, float)):
       continue
-    if value != 0 and abs(error) > POORLY_DETERMINED_RELATIVE_ERROR * abs(value):
+    if name == "background" and abs(error) < UNDETERMINED_STDERR:
+      # A background near zero has a large relative error by construction.
+      continue
+    if is_undetermined(value, error):
+      undetermined.append(str(name))
+    elif value != 0 and abs(error) > POORLY_DETERMINED_RELATIVE_ERROR * abs(value):
       poorly.append(str(name))
+  if undetermined:
+    issues.append(
+      "Undetermined parameters (the data does not constrain them): "
+      + ", ".join(undetermined)
+      + "."
+    )
+    suggestions.append(
+      "Fix "
+      + ", ".join(undetermined)
+      + " at a physically sensible value with set-sans-parameter vary=false; "
+      "the fit is insensitive to them, so this does not bias the others."
+    )
   if poorly:
     issues.append("Poorly determined parameters: " + ", ".join(poorly) + ".")
     suggestions.append(
