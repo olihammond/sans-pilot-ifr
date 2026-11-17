@@ -1,11 +1,11 @@
 Perform a broad, non-destructive functional test of the `sans-pilot` MCP server.
 
-The goal is to verify that `sans-pilot` exposes `sans-fitter` functionality correctly. Do not expect the MCP server to independently correct, reinterpret, or validate scientific results produced by `sans-fitter`. Clearly distinguish:
+The goal is to verify that `sans-pilot` exposes `IQuana` functionality correctly. Do not expect the MCP server to independently correct, reinterpret, or validate scientific results produced by `IQuana`. Clearly distinguish:
 
 1. MCP transport/schema/artifact failures;
 2. `sans-pilot` adapter failures;
-3. errors or limitations explicitly identified as coming from `sans-fitter`;
-4. behavior and limitations explicitly documented by `sans-fitter`.
+3. errors or limitations explicitly identified as coming from `IQuana`;
+4. behavior and limitations explicitly documented by `IQuana`.
 
 Do not infer an error's originating layer from its wording. If the response does
 not identify the origin, report it as unknown.
@@ -99,21 +99,21 @@ Test the following areas:
 - Submit one valid engine-specific option through `fit.options`.
 - Confirm that the option is accepted and echoed in the fit configuration. Do
   not claim that it reached an internal optimizer unless the response proves it.
-- Submit one unsupported optimizer method once and confirm that the resulting `sans-fitter` error is transported clearly.
+- Submit one unsupported optimizer method once and confirm that the resulting `IQuana` error is transported clearly.
 - Do not retry the identical invalid request.
 
 9. Bayesian fitting
 
 - Run a small diagnostic DREAM fit on seeded simulated data.
 - Use measured simulated uncertainties.
-- Report requested settings and the posterior summary returned by `sans-fitter`.
+- Report requested settings and the posterior summary returned by `IQuana`.
 - Report R-hat and ESS exactly when present.
 - Do not invent convergence thresholds or add an independent convergence decision.
 - Do not request the posterior chain unless needed to diagnose transport.
 
 10. Model-free P(r)
 
-- Run a bounded Dmax scan and report the returned Rg/I(0) and data chi-squared values. Sans-fitter documents a good Dmax as showing an Rg/I(0) plateau and a minimum in data chi-squared.
+- Run a bounded Dmax scan and report the returned Rg/I(0) and data chi-squared values. IQuana documents a good Dmax as showing an Rg/I(0) plateau and a minimum in data chi-squared.
 - Run automatic P(r) inversion using a Dmax selected from those returned scan quantities.
 - Run one manual inversion using an `(n_terms, alpha)` pair returned by the tools.
 - Report Dmax, Rg, I(0), alpha, basis terms, background, data chi-squared, effective degrees of freedom, oscillation, positivity, condition/rank diagnostics, and dependency warnings.
@@ -165,7 +165,7 @@ Produce a concise final report containing:
 - internal artifact URI, `read-sans-artifact`, browser-download link, chunking, tamper rejection, and persistence behavior;
 - concurrency and worker-queue results;
 - whether the separate operator-assisted cancellation and restart-persistence tests are still required;
-- scientific caveats exactly as returned by `sans-fitter`;
+- scientific caveats exactly as returned by `IQuana`;
 - a prioritized issue list.
 
-Do not treat different optimizer objective values as equivalent unless the returned metadata explicitly establishes the same normalization. Do not modify uploaded data or add scientific conclusions that are not present in the returned results or documented by `sans-fitter`. Redact complete download URLs, signatures, artifact tokens, user identifiers, and internal service addresses from any saved report.
+Do not treat different optimizer objective values as equivalent unless the returned metadata explicitly establishes the same normalization. Do not modify uploaded data or add scientific conclusions that are not present in the returned results or documented by `IQuana`. Redact complete download URLs, signatures, artifact tokens, user identifiers, and internal service addresses from any saved report.

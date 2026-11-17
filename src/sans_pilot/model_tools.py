@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastmcp import FastMCP
-from sans_fitter import PD_DEFAULTS, PD_DISTRIBUTION_TYPES, get_all_models
+from iquana import PD_DEFAULTS, PD_DISTRIBUTION_TYPES, get_all_models
 
 from sans_pilot.models import STRUCTURE_FACTORS, describe_model
 from sans_pilot.schemas import ModelSpecification

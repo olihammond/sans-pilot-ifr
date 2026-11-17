@@ -8,7 +8,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-from sans_fitter import pr_inversion
+from iquana import pr_inversion
 
 from sans_pilot.analyses._fitting_helpers import (
   filter_actionable_warnings,
@@ -149,7 +149,7 @@ def invert_sans_pr_service(
 
 
 def _format_dmax_scan(scan: Any) -> dict[str, Any]:
-  """Serialize the values returned by sans-fitter's Dmax scan."""
+  """Serialize the values returned by IQuana's Dmax scan."""
   return {
     "n_terms": normalize_scalar(scan.n_terms),
     "successful_points": int(scan.d_max_values.size),

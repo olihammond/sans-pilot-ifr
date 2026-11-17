@@ -11,7 +11,7 @@ from typing import Any, cast
 import numpy as np
 import plotly.graph_objects as go
 from fastmcp import FastMCP
-from sans_fitter import SANSFitter, examples
+from iquana import IQuana, examples
 from sasdata.dataloader.data_info import Data1D
 
 from sans_pilot.analyses._fitting_helpers import (
@@ -95,7 +95,7 @@ def _render_single_simulation(
   with scientific_runtime(), warnings.catch_warnings(record=True) as captured:
     warnings.simplefilter("always")
     loaded = load_data_source(request.source, user_id=None)
-    fitter = SANSFitter()
+    fitter = IQuana()
     with contextlib.redirect_stdout(io.StringIO()):
       fitter.set_data(loaded.data)
       plot_path = output_dir / "simulated_sans_data.png"
@@ -302,14 +302,14 @@ def register_example_tools(mcp: FastMCP) -> None:
   mcp.tool(
     name="simulate-sans-data",
     description=(
-      "Generate and plot synthetic 1D SANS data through sans-fitter. Set a seed "
+      "Generate and plot synthetic 1D SANS data through IQuana. Set a seed "
       "when reproducible output is required. CSV export is opt-in."
     ),
   )(simulate_sans_data)
   mcp.tool(
     name="simulate-sans-pair",
     description=(
-      "Generate a matched sample/background pair through sans-fitter on an "
+      "Generate a matched sample/background pair through IQuana on an "
       "identical Q grid. Set a seed for reproducibility. CSV exports are opt-in."
     ),
   )(simulate_sans_pair)

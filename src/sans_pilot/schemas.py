@@ -22,7 +22,7 @@ class UploadDataSource(StrictRequest):
 
 
 class ExampleDataSource(StrictRequest):
-  """A curated one-dimensional dataset bundled with sans-fitter."""
+  """A curated one-dimensional dataset bundled with IQuana."""
 
   kind: Literal["example"]
   name: str = Field(min_length=1)
@@ -156,8 +156,18 @@ class PolydispersitySetting(StrictRequest):
   vary: bool = False
 
 
+class ResolutionSetting(StrictRequest):
+  """How instrument resolution is applied, passed to ``IQuana.set_resolution``."""
+
+  mode: str = "data"
+  dq_over_q: float | None = None
+  slit_length: float | None = None
+  slit_width: float | None = None
+  accuracy: str | None = None
+
+
 class OptimizationSettings(StrictRequest):
-  """Point-estimate settings passed to ``SANSFitter.fit``."""
+  """Point-estimate settings passed to ``IQuana.fit``."""
 
   mode: Literal["optimization"] = "optimization"
   engine: str = "bumps"
@@ -166,7 +176,7 @@ class OptimizationSettings(StrictRequest):
 
 
 class BayesianSettings(StrictRequest):
-  """Settings passed to ``SANSFitter.fit_bayesian``."""
+  """Settings passed to ``IQuana.fit_bayesian``."""
 
   mode: Literal["bayesian"]
   method: str = "dream"
@@ -189,6 +199,8 @@ class FitArtifactOptions(StrictRequest):
   include_results_csv: bool = False
   include_sasview_parameters: bool = True
   include_posterior_chain: bool = False
+  include_analysis_json: bool = False
+  include_report_html: bool = False
   posterior_plots: list[
     Literal["pairs", "distribution", "predictive", "correlations", "trace"]
   ] = Field(default_factory=lambda: ["predictive"], max_length=5)
@@ -209,6 +221,8 @@ class FitSansModelRequest(StrictRequest):
     default_factory=dict,
     max_length=20,
   )
+  resolution: ResolutionSetting | None = None
+  weighting: str | None = None
   fit: FitSettings = Field(default_factory=OptimizationSettings)
   artifacts: FitArtifactOptions = Field(default_factory=FitArtifactOptions)
 

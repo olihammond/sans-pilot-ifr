@@ -80,3 +80,66 @@ def test_fit_tool_returns_structured_summary_and_resource_links(tmp_path, monkey
   assert [item["name"] for item in artifacts] == [plot.name, table.name]
   assert all(item["uri"].startswith("sans-pilot://artifact/") for item in artifacts)
   assert any(item.type == "image" for item in response.content)
+
+
+def test_resolution_and_weighting_are_passed_to_iquana():
+  from sans_pilot.fitting import apply_resolution_and_weighting
+
+  calls: list[tuple[str, Any]] = []
+
+  class Fitter:
+    def set_resolution(self, **kwargs):
+      calls.append(("resolution", kwargs))
+
+    def set_weighting(self, mode):
+      calls.append(("weighting", mode))
+
+  request = FitSansModelRequest.model_validate(
+    {
+      **_request().model_dump(),
+      "resolution": {"mode": "pinhole", "dq_over_q": 0.05},
+      "weighting": "sqrt",
+    }
+  )
+  apply_resolution_and_weighting(Fitter(), request)  # type: ignore[arg-type]
+  apply_resolution_and_weighting(Fitter(), _request())  # type: ignore[arg-type]
+
+  assert calls == [
+    ("resolution", {"mode": "pinhole", "dq_over_q": 0.05}),
+    ("weighting", "sqrt"),
+  ]
+
+
+def test_real_fit_reports_total_and_reduced_chi_squared(tmp_path):
+  from sans_pilot.fitting import run_typed_fit
+
+  request = FitSansModelRequest.model_validate(
+    {
+      "pipeline": {
+        "primary": {
+          "kind": "simulation",
+          "model": "sphere",
+          "parameters": {"radius": 50},
+          "seed": 1,
+        }
+      },
+      "model": {"kind": "atomic", "model": "sphere"},
+      "parameters": {
+        "radius": {"value": 40, "min": 10, "max": 100, "vary": True},
+        "scale": {"value": 1, "min": 0, "max": 10, "vary": True},
+      },
+      "resolution": {"mode": "none"},
+      "fit": {"mode": "optimization", "engine": "bumps", "method": "lm"},
+      "artifacts": {"include_analysis_json": True},
+    }
+  )
+  out = run_typed_fit(request, user_id=None, output_dir=tmp_path)
+  result = out["summary"]["result"]
+
+  assert result["dof"] == 98
+  assert abs(result["chisq"] / result["dof"] - result["reduced_chisq"]) < 1e-9
+  assert 0.3 < result["reduced_chisq"] < 3
+  assert abs(result["parameters"]["radius"]["value"] - 50) < 1
+  assert out["summary"]["resolution"]["mode"] == "none"
+  assert not any("Resolution mode" in w for w in out["summary"]["warnings"])
+  assert (tmp_path / "analysis.json").is_file()

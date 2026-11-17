@@ -1,4 +1,4 @@
-"""Tests for the strict sans-fitter 0.3 dataset contract."""
+"""Tests for the strict IQuana 0.3 dataset contract."""
 
 from __future__ import annotations
 

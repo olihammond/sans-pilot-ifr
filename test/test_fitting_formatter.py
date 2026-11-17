@@ -301,3 +301,32 @@ def test_format_posterior_summary_excludes_raw_samples():
     },
   }
   assert "samples" not in result["parameters"]["radius"]
+
+  def test_iquana_statistics_and_strong_correlations_are_forwarded(self):
+    out = format_fit_result(
+      {
+        "engine": "bumps",
+        "method": "lm",
+        "chisq": np.float64(72.8),
+        "reduced_chisq": np.float64(0.743),
+        "n_points": 100,
+        "n_free": 2,
+        "dof": 98,
+        "converged": None,
+        "message": "ok",
+        "on_bounds": ["radius"],
+        "cov": np.array([[4.0, -1.96], [-1.96, 1.0]]),
+        "cov_labels": ["radius", "scale"],
+        "cov_source": "jacobian",
+        "parameters": {},
+      }
+    )
+
+    assert out["chisq"] == 72.8
+    assert out["reduced_chisq"] == 0.743
+    assert out["dof"] == 98
+    assert out["on_bounds"] == ["radius"]
+    assert "cov" not in out
+    assert out["strong_correlations"] == [
+      {"parameters": ["radius", "scale"], "correlation": -0.98}
+    ]

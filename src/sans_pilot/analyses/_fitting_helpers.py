@@ -26,6 +26,55 @@ _OPTIMIZER_METADATA_FIELDS = (
 )
 
 
+# IQuana 0.4+ reports total chi-squared as ``chisq`` and the reduced value as
+# ``reduced_chisq`` (sans-fitter 0.3 reported the reduced value as ``chisq``).
+_FIT_RESULT_FIELDS = (
+  "engine",
+  "method",
+  "chisq",
+  "reduced_chisq",
+  "n_points",
+  "n_free",
+  "dof",
+  "converged",
+  "message",
+  "weighting_note",
+  "cov_source",
+  "on_bounds",
+  "parameters",
+)
+_STRONG_CORRELATION = 0.95
+
+
+def strong_correlations(fit_result: dict[str, Any]) -> list[dict[str, Any]]:
+  """Return parameter pairs whose covariance implies |correlation| >= 0.95."""
+  cov = fit_result.get("cov")
+  labels = fit_result.get("cov_labels")
+  if cov is None or not labels:
+    return []
+  try:
+    rows = [[float(value) for value in row] for row in cov]
+  except (TypeError, ValueError):
+    return []
+  if len(rows) != len(labels) or any(len(row) != len(labels) for row in rows):
+    return []
+  pairs: list[dict[str, Any]] = []
+  for i in range(len(labels)):
+    for j in range(i + 1, len(labels)):
+      denominator = math.sqrt(abs(rows[i][i] * rows[j][j]))
+      if not denominator or not math.isfinite(denominator):
+        continue
+      correlation = rows[i][j] / denominator
+      if math.isfinite(correlation) and abs(correlation) >= _STRONG_CORRELATION:
+        pairs.append(
+          {
+            "parameters": [str(labels[i]), str(labels[j])],
+            "correlation": round(correlation, 4),
+          }
+        )
+  return pairs[:_MAX_COLLECTION_ITEMS]
+
+
 def filter_actionable_warnings(messages: Iterable[str]) -> list[str]:
   """Return unique warnings that are useful to the analysis consumer."""
   actionable: list[str] = []
@@ -230,9 +279,12 @@ def format_fit_result(fit_result: Any) -> dict[str, Any]:
 
   formatted = {
     key: normalize_value(fit_result[key])
-    for key in ("engine", "method", "chisq", "parameters")
+    for key in _FIT_RESULT_FIELDS
     if key in fit_result
   }
+  correlations = strong_correlations(fit_result)
+  if correlations:
+    formatted["strong_correlations"] = correlations
 
   raw_optimizer = fit_result.get("result")
   optimizer_fields = (

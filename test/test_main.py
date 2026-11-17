@@ -178,7 +178,7 @@ def test_render_data_only_plot_never_configures_or_fits_model(tmp_path, monkeypa
       source={"kind": "upload", "file_name": "sample.csv"},
     ),
   )
-  monkeypatch.setattr(data_tools, "SANSFitter", Fitter)
+  monkeypatch.setattr(data_tools, "IQuana", Fitter)
   output_path = tmp_path / "sans_data_plot.png"
 
   result = data_tools._render_data_only_plot(

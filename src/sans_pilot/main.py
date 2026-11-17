@@ -32,7 +32,7 @@ SANS (Small-Angle Neutron Scattering) data analysis server.
 6. `list-sans-models` - Show exact available model names
 7. `get-sans-model-parameters` - Discover parameters for the exact atomic, interacting, or composite model
 8. `list-structure-factors` / `get-polydispersity-options` - Discover interaction and size-distribution controls
-9. `fit-sans-model` - Run optimization or Bayesian fitting through sans-fitter
+9. `fit-sans-model` - Run optimization or Bayesian fitting through IQuana
 10. `scan-sans-dmax` / `invert-sans-pr` - Explore Dmax and recover model-free P(r)
 11. `list-sans-examples` / `inspect-sans-example` - Discover curated teaching and validation datasets
 12. `simulate-sans-data` / `simulate-sans-pair` - Generate synthetic data with known truth
@@ -55,10 +55,10 @@ SANS (Small-Angle Neutron Scattering) data analysis server.
 
 ## Fitting API Facts
 - A parameter is optimized when its `vary` setting is true
-- `q_min` and `q_max` restrict the fitted Q range; sans-fitter documents beam-stop spillover and background-dominated points as example uses
+- `q_min` and `q_max` restrict the fitted Q range; IQuana documents beam-stop spillover and background-dominated points as example uses
 - dQ resolution is read when present in the input data
 - Bayesian fitting uses BUMPS DREAM and does not support composite models or parameter links
-- For P(r), sans-fitter provides Dmax scanning; buffer-subtracted data can use `fit_background=false`
+- For P(r), IQuana provides Dmax scanning; buffer-subtracted data can use `fit_background=false`
   """,
 )
 

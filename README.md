@@ -1,7 +1,7 @@
 # SANS-pilot
 
 MCP server for reduced one-dimensional Small-Angle Neutron Scattering data
-analysis, powered by [SANS-fitter](https://github.com/ai4se1dk/SANS-fitter).
+analysis, powered by [IQuana](https://github.com/SasView/IQuana) (formerly SANS-fitter).
 
 ## Scientific tools
 
@@ -17,7 +17,7 @@ analysis, powered by [SANS-fitter](https://github.com/ai4se1dk/SANS-fitter).
 | `get-sans-model-parameters`   | Discover an exact atomic, interacting, or composite model contract |
 | `list-structure-factors`      | List supported inter-particle interaction models                   |
 | `get-polydispersity-options`  | List size-distribution types and defaults                          |
-| `fit-sans-model`              | Run optimization or Bayesian fitting through sans-fitter           |
+| `fit-sans-model`              | Run optimization or Bayesian fitting through IQuana           |
 | `scan-sans-dmax`              | Explore Dmax using Rg, I(0), fit-quality, and positivity trends    |
 | `invert-sans-pr`              | Recover the model-free real-space pair distribution P(r)           |
 | `list-sans-examples`          | Discover curated measured and simulated datasets                   |
@@ -54,7 +54,7 @@ Optional `auxiliary` sources and ordered `operations` support `add`,
 `subtract`, `multiply`, and `divide` with another dataset or a scalar. Optional
 `q_min` and `q_max` select the active scientific range. Arithmetic behavior,
 including uncertainty, unit, and resolution propagation, is provided directly
-by `sans-fitter`.
+by `IQuana`.
 
 ### Plot without fitting
 
@@ -75,7 +75,7 @@ performs a fit.
 
 Call `get-sans-model-parameters` with the exact model specification you intend
 to fit. It returns parameter names, defaults, bounds, polydispersity support,
-component aliases, and links reported by the configured sans-fitter model.
+component aliases, and links reported by the configured IQuana model.
 
 ### Atomic model fit
 
@@ -101,9 +101,35 @@ component aliases, and links reported by the configured sans-fitter model.
 }
 ```
 
-The selected engine and method are passed directly to `sans-fitter`. Fit
+The selected engine and method are passed directly to `IQuana`. Fit
 objectives, uncertainties, optimizer status, warnings, and errors retain their
-`sans-fitter` meanings and are not reinterpreted by the MCP server.
+`IQuana` meanings and are not reinterpreted by the MCP server.
+
+### Fit statistics, resolution, and weighting
+
+Since IQuana 0.4 `chisq` is the **total** chi-squared; the reduced value is
+reported separately as `reduced_chisq` (sans-fitter 0.3 reported the reduced
+value under `chisq`). The fit result also forwards `n_points`, `n_free`, `dof`,
+`converged`, the optimizer `message`, `cov_source`, any parameters resting
+`on_bounds`, and parameter pairs with |correlation| >= 0.95 as
+`strong_correlations`.
+
+Optional `resolution` and `weighting` are passed to `IQuana.set_resolution` and
+`IQuana.set_weighting`:
+
+```json
+{
+  "resolution": { "mode": "pinhole", "dq_over_q": 0.05 },
+  "weighting": "dI"
+}
+```
+
+When data carries no dQ column and no resolution is stated, IQuana warns that
+the model is evaluated unsmeared; set `{"mode": "none"}` to state that choice.
+
+`artifacts.include_analysis_json` writes `analysis.json` (reopen with
+`IQuana.load_analysis`) and `artifacts.include_report_html` writes a
+self-contained `fit_report.html`.
 
 ### Structure factor and polydispersity
 
@@ -137,7 +163,7 @@ Supported structure factors are `hardsphere`, `hayter_msa`, `squarewell`, and
 ### Composite model
 
 Composite models combine uniquely named components. `shared_parameters` and
-`parameter_links` configure the equality mechanisms provided by sans-fitter.
+`parameter_links` configure the equality mechanisms provided by IQuana.
 
 ```json
 {
@@ -173,9 +199,9 @@ Additive component curves are included in the fit plot by default.
 }
 ```
 
-Bayesian fitting uses the BUMPS DREAM integration provided by `sans-fitter`.
+Bayesian fitting uses the BUMPS DREAM integration provided by `IQuana`.
 The compact response serializes the posterior summary and diagnostics returned
-by `sans-fitter`; raw samples are not placed in model context.
+by `IQuana`; raw samples are not placed in model context.
 
 Every fit returns compact structured JSON, inline MCP image content for plots,
 and lazy MCP resource URIs for all generated files. When browser downloads are
@@ -188,9 +214,9 @@ their contents do not consume model context.
 
 ## Model-free P(r) inversion
 
-`scan-sans-dmax` exposes sans-fitter's Dmax exploration. The scan returns
+`scan-sans-dmax` exposes IQuana's Dmax exploration. The scan returns
 arrays for Rg, I(0), data chi-squared, oscillations, positivity, background,
-and alpha plus `dmax_scan.png`. Sans-fitter documents a good Dmax as showing an
+and alpha plus `dmax_scan.png`. IQuana documents a good Dmax as showing an
 Rg/I(0) plateau and a minimum in the data chi-squared.
 
 `invert-sans-pr` supports automatic selection of basis terms and regularization
@@ -214,7 +240,7 @@ The result includes Dmax, Rg, I(0), background treatment, data chi-squared,
 effective degrees of freedom, oscillations, positivity fractions, matrix
 condition/rank diagnostics, and whether uncertainties were fabricated. It
 returns P(r) and I(Q)/residual plots; numerical P(r) CSV is opt-in. Pinhole dQ
-is ignored and slit smearing is unsupported by sans-fitter 0.3 inversion.
+is ignored and slit smearing is unsupported by IQuana 0.6 inversion.
 
 Buffer-subtracted protein data normally uses `fit_background=false` because a
 fitted flat background can absorb I(0) and bias Rg.
@@ -227,7 +253,7 @@ models and parameters, structure factors, polydispersity, and caveats.
 `known_truth=null`; suggested values are starting points, not results.
 
 `simulate-sans-data` and `simulate-sans-pair` pass simulation settings to
-`sans-fitter`; set an explicit seed when reproducible output is required. They
+`IQuana`; set an explicit seed when reproducible output is required. They
 return generation truth separately from any later fitted estimate. The pair
 tool produces independent noise on one shared Q grid, suitable for subtraction
 tests. Plots are returned by default and CSV files only when requested.

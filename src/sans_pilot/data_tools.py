@@ -7,8 +7,8 @@ import io
 from typing import Annotated, Any, cast
 
 from fastmcp import FastMCP
+from iquana import IQuana
 from pydantic import Field
-from sans_fitter import SANSFitter
 
 from sans_pilot.artifacts import artifact_result, create_run_directory
 from sans_pilot.datasets import (
@@ -41,8 +41,8 @@ def describe_sans_capabilities() -> dict[str, Any]:
       "plot measured data without fitting",
       "add, subtract, multiply, and divide datasets or scalars",
       "select an active Q range",
-      "load curated sans-fitter examples",
-      "generate simulated data through sans-fitter",
+      "load curated IQuana examples",
+      "generate simulated data through IQuana",
       "generate matched sample/background simulations on a common Q grid",
       "fit sasmodels form-factor and structure-factor models",
       "scan maximum particle dimension and recover model-free P(r)",
@@ -135,7 +135,7 @@ def _render_data_only_plot(
 ) -> dict[str, Any]:
   prepared = prepare_dataset(pipeline, user_id=user_id)
   prepared.warnings.extend(log_plot_warnings(prepared.data, log_scale=log_scale))
-  fitter = SANSFitter()
+  fitter = IQuana()
   with contextlib.redirect_stdout(io.StringIO()):
     fitter.set_data(prepared.data)
   figure = fitter.plot_results(

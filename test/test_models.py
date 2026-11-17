@@ -1,10 +1,10 @@
-"""Tests for model configuration pass-through to sans-fitter."""
+"""Tests for model configuration pass-through to IQuana."""
 
 from __future__ import annotations
 
 from typing import cast
 
-from sans_fitter import SANSFitter
+from iquana import IQuana
 
 from sans_pilot import models
 from sans_pilot.schemas import (
@@ -63,7 +63,7 @@ class FakeFitter:
 def test_constructs_models_by_calling_sans_fitter_api():
   atomic = FakeFitter()
   models.construct_model(
-    cast(SANSFitter, atomic),
+    cast(IQuana, atomic),
     AtomicModel(
       kind="atomic",
       model="sphere",
@@ -78,7 +78,7 @@ def test_constructs_models_by_calling_sans_fitter_api():
 
   composite = FakeFitter()
   models.construct_model(
-    cast(SANSFitter, composite),
+    cast(IQuana, composite),
     CompositeModel(
       kind="composite",
       operation="+",
@@ -102,11 +102,11 @@ def test_constructs_models_by_calling_sans_fitter_api():
 def test_parameter_and_polydispersity_settings_are_passed_through():
   fitter = FakeFitter()
   models.apply_parameter_overrides(
-    cast(SANSFitter, fitter),
+    cast(IQuana, fitter),
     {"dependency_parameter": ParameterOverride(value=10, vary=True)},
   )
   setting = PolydispersitySetting(pd_width=0.1, pd_n=15)
-  models.apply_polydispersity(cast(SANSFitter, fitter), {"radius": setting})
+  models.apply_polydispersity(cast(IQuana, fitter), {"radius": setting})
 
   assert fitter.calls[0] == (
     "parameter",

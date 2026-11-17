@@ -8,13 +8,14 @@ import warnings
 from pathlib import Path
 from typing import Any, cast
 
-from sans_fitter import SANSFitter
+from iquana import IQuana
 
 from sans_pilot.analyses._fitting_helpers import (
   build_parameter_export,
   filter_actionable_warnings,
   format_fit_result,
   format_posterior_summary,
+  normalize_value,
   serialize_sasview_parameter_values,
 )
 from sans_pilot.datasets import (
@@ -44,8 +45,8 @@ from sans_pilot.schemas import (
 SCHEMA_VERSION = "1.0"
 
 
-def _run_fit(fitter: SANSFitter, request: FitSansModelRequest) -> dict[str, Any]:
-  """Pass the requested fit settings directly to sans-fitter."""
+def _run_fit(fitter: IQuana, request: FitSansModelRequest) -> dict[str, Any]:
+  """Pass the requested fit settings directly to IQuana."""
   if isinstance(request.fit, BayesianSettings):
     return fitter.fit_bayesian(
       method=request.fit.method,
@@ -64,15 +65,25 @@ def _run_fit(fitter: SANSFitter, request: FitSansModelRequest) -> dict[str, Any]
   )
 
 
+def apply_resolution_and_weighting(
+  fitter: IQuana, request: FitSansModelRequest
+) -> None:
+  """Pass explicit resolution and weighting choices through to IQuana."""
+  if request.resolution is not None:
+    fitter.set_resolution(**request.resolution.model_dump(exclude_none=True))
+  if request.weighting is not None:
+    fitter.set_weighting(request.weighting)
+
+
 def _write_fit_artifacts(
-  fitter: SANSFitter,
+  fitter: IQuana,
   request: FitSansModelRequest,
   *,
   output_dir: Path,
   fit_result: dict[str, Any],
   warning_messages: list[str],
 ) -> dict[str, Path]:
-  """Serialize plots/files provided by the configured sans-fitter result."""
+  """Serialize plots/files provided by the configured IQuana result."""
   options = request.artifacts
   warning_messages.extend(
     log_plot_warnings(fitter.data, log_scale=options.plot_log_scale)
@@ -117,6 +128,17 @@ def _write_fit_artifacts(
         "single-model format cannot represent composite models."
       )
 
+  if options.include_analysis_json:
+    analysis_path = output_dir / "analysis.json"
+    fitter.save_analysis(str(analysis_path))
+    artifacts[analysis_path.name] = analysis_path
+
+  if options.include_report_html:
+    report_path = output_dir / "fit_report.html"
+    with render_runtime():
+      fitter.report(str(report_path), offline=True)
+    artifacts[report_path.name] = report_path
+
   if isinstance(request.fit, BayesianSettings):
     artifacts.update(
       write_posterior_artifacts(fitter, output_dir=output_dir, options=options)
@@ -129,6 +151,8 @@ def _artifact_metadata(artifacts: dict[str, Path]) -> list[dict[str, str]]:
     ".png": "image/png",
     ".csv": "text/csv",
     ".txt": "text/plain",
+    ".json": "application/json",
+    ".html": "text/html",
   }
   return [
     {
@@ -145,9 +169,9 @@ def run_typed_fit(
   user_id: str | None,
   output_dir: str | Path,
 ) -> dict[str, Any]:
-  """Configure sans-fitter, execute it, and serialize its native result."""
+  """Configure IQuana, execute it, and serialize its native result."""
   prepared: PreparedData = prepare_dataset(request.pipeline, user_id=user_id)
-  fitter = SANSFitter()
+  fitter = IQuana()
   output_path = Path(output_dir)
   output_path.mkdir(parents=True, exist_ok=True)
   artifact_warnings: list[str] = []
@@ -160,6 +184,7 @@ def run_typed_fit(
       apply_parameter_overrides(fitter, request.parameters)
       apply_polydispersity(fitter, request.polydispersity)
       apply_parameter_links(fitter, request.model)
+      apply_resolution_and_weighting(fitter, request)
       fit_result = _run_fit(fitter, request)
       artifacts = _write_fit_artifacts(
         fitter,
@@ -192,6 +217,8 @@ def run_typed_fit(
       "polydispersity": resolved_polydispersity_configuration(
         fitter, request.polydispersity
       ),
+      "resolution": normalize_value(fitter.get_resolution()),
+      "weighting": normalize_value(fitter.get_weighting()),
       "fit": request.fit.model_dump(),
       "result": result,
       "warnings": warning_messages,

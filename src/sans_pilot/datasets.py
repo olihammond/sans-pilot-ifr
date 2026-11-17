@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
-from sans_fitter import SANSFitter, data_ops, examples
+from iquana import IQuana, data_ops, examples
 from sasdata.dataloader.data_info import Data1D
 from sasdata.dataloader.loader import Loader
 
@@ -120,7 +120,7 @@ def _format_for_extension(extension: str) -> str:
 
 def _normalize_data(data: Any) -> Data1D:
   """Validate and normalize in-memory data through the public fitter API."""
-  fitter = SANSFitter()
+  fitter = IQuana()
   with contextlib.redirect_stdout(io.StringIO()):
     fitter.set_data(data)
   return cast(Data1D, fitter.data)
@@ -325,7 +325,7 @@ def prepare_dataset(
     )
 
     if pipeline.q_min is not None or pipeline.q_max is not None:
-      fitter = SANSFitter()
+      fitter = IQuana()
       with contextlib.redirect_stdout(io.StringIO()):
         fitter.set_data(data)
         apply_q_range(fitter, q_min=pipeline.q_min, q_max=pipeline.q_max)

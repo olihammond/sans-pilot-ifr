@@ -6,7 +6,7 @@ import contextlib
 import io
 from typing import Any
 
-from sans_fitter import SANSFitter
+from iquana import IQuana
 
 from sans_pilot.analyses._fitting_helpers import normalize_value
 from sans_pilot.schemas import (
@@ -29,7 +29,7 @@ STRUCTURE_FACTORS: dict[str, str] = {
 }
 
 
-def construct_model(fitter: SANSFitter, specification: ModelSpecification) -> None:
+def construct_model(fitter: IQuana, specification: ModelSpecification) -> None:
   """Construct an atomic/product/composite model without applying links."""
   if isinstance(specification, AtomicModel):
     fitter.set_model(specification.model)
@@ -58,16 +58,16 @@ def construct_model(fitter: SANSFitter, specification: ModelSpecification) -> No
 
 
 def apply_parameter_overrides(
-  fitter: SANSFitter,
+  fitter: IQuana,
   overrides: dict[str, ParameterOverride],
 ) -> None:
-  """Pass parameter settings through to sans-fitter."""
+  """Pass parameter settings through to IQuana."""
   for name, override in overrides.items():
     fitter.set_param(name, **override.model_dump(exclude_none=True))
 
 
 def apply_polydispersity(
-  fitter: SANSFitter,
+  fitter: IQuana,
   settings: dict[str, PolydispersitySetting],
 ) -> None:
   """Apply explicitly requested size-distribution settings."""
@@ -78,7 +78,7 @@ def apply_polydispersity(
     fitter.set_pd_param(name, **setting.model_dump())
 
 
-def friendly_polydisperse_parameters(fitter: SANSFitter) -> list[str]:
+def friendly_polydisperse_parameters(fitter: IQuana) -> list[str]:
   """Return public component aliases without exposing sasmodels A/B prefixes."""
   components = sorted(
     fitter.get_components(), key=lambda item: len(item[0]), reverse=True
@@ -96,7 +96,7 @@ def friendly_polydisperse_parameters(fitter: SANSFitter) -> list[str]:
 
 
 def resolved_polydispersity_configuration(
-  fitter: SANSFitter,
+  fitter: IQuana,
   settings: dict[str, PolydispersitySetting],
 ) -> dict[str, Any]:
   """Return all applied fixed and varied size-distribution settings."""
@@ -115,7 +115,7 @@ def resolved_polydispersity_configuration(
 
 
 def apply_parameter_links(
-  fitter: SANSFitter,
+  fitter: IQuana,
   specification: ModelSpecification,
 ) -> None:
   """Apply equality links after all writable parameter settings."""
@@ -124,7 +124,7 @@ def apply_parameter_links(
 
 
 def resolved_model_configuration(
-  fitter: SANSFitter,
+  fitter: IQuana,
   specification: ModelSpecification,
 ) -> dict[str, Any]:
   """Return bounded, user-facing model provenance."""
@@ -168,7 +168,7 @@ def resolved_model_configuration(
 
 def describe_model(specification: ModelSpecification) -> dict[str, Any]:
   """Construct an exact model and return its strict discovery contract."""
-  fitter = SANSFitter()
+  fitter = IQuana()
   with contextlib.redirect_stdout(io.StringIO()):
     construct_model(fitter, specification)
     apply_parameter_links(fitter, specification)

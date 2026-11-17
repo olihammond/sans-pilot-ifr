@@ -7,8 +7,8 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
+from iquana import examples
 from pydantic import ValidationError
-from sans_fitter import examples
 
 from sans_pilot import example_tools
 from sans_pilot.schemas import SimulateSansDataRequest, SimulateSansPairRequest
