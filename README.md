@@ -246,8 +246,13 @@ the output folder (`<data>_analysis/` by default) receives:
 - `analysis.json` - reloadable with `IQuana.load_analysis`;
 - `analysis_guided.json` - the state before the model's turn, with a warning
   in the report if the refinement made the fit worse;
-- `fit_plot.png`, `sasview_parameter_values.txt`, `guided_result.json` and
-  `transcript.json`.
+- `<data>_<model>.ipynb` - a ready-to-run IQuana notebook with the data
+  snapshot `<data>_<model>_data.csv`: it rebuilds the fit with explicit,
+  editable IQuana calls (resolution, weighting, Q range, model, structure
+  factor, every parameter with its bounds, polydispersity), checks that it
+  reproduces the reported χ², then refits, reports and saves. Open it with
+  Jupyter from the output folder, where its data file sits;
+- `fit_plot.png`, `guided_result.json` and `transcript.json`.
 
 Malformed tool arguments, unknown tools and tool calls printed as text are
 handled; an endpoint that rejects tool definitions falls back to

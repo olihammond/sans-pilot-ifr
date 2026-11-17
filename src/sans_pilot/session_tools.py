@@ -418,8 +418,9 @@ def register_session_tools(mcp: FastMCP) -> None:
   mcp.tool(
     name="export-sans-analysis",
     description=(
-      "Write the session's Markdown report, reloadable IQuana analysis file, "
-      "SasView parameter file and fit plot."
+      "Write the session's HTML and Markdown reports, reloadable IQuana "
+      "analysis file, a ready-to-run IQuana notebook with its data, and the "
+      "fit plot."
     ),
   )(export_sans_analysis)
 

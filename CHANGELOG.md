@@ -27,6 +27,10 @@
 - **Text diagnostics** for models that cannot read plots: a verdict, issues
   (bounds, correlations, undetermined or poorly determined parameters,
   systematic residuals located by Q range) and suggested next actions.
+- **IQuana notebook export**: every guided analysis writes a ready-to-run
+  notebook (and data snapshot) that rebuilds the fit with explicit IQuana
+  calls, checks it reproduces the reported χ², and refits. It replaces the
+  SasView parameter file of the guided export, as in the Sassafras GUI.
 - **Reports**: `report.html` (interactive figures, parameter tables,
   diagnostics, candidate comparison) and `report.md` for every analysis.
 - **`sans-pilot-agent`**: a command-line runner that executes the procedure

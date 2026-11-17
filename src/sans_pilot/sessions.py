@@ -30,11 +30,9 @@ from iquana import IQuana, get_all_models, get_structure_factors
 from sasdata.dataloader.data_info import Data1D
 
 from sans_pilot.analyses._fitting_helpers import (
-  build_parameter_export,
   filter_actionable_warnings,
   format_fit_result,
   normalize_value,
-  serialize_sasview_parameter_values,
 )
 from sans_pilot.artifacts import artifact_root, safe_path_component
 from sans_pilot.datasets import inspect_data, load_data_source
@@ -1052,6 +1050,61 @@ def report_markdown(session: Session, fitter: IQuana | None) -> str:
   return "\n".join(lines) + "\n"
 
 
+def _write_notebook(
+  session: Session, analysis_path: Path, output_dir: Path
+) -> dict[str, Path]:
+  """Write an IQuana notebook (and its data snapshot) for the session's fit."""
+  from sans_pilot.notebook import build_notebook, safe_stem
+
+  analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+  source = session.meta.get("source", {})
+  name = str(source.get("file_name") or source.get("name") or "data")
+  model = model_expression(session) or analysis["configuration"]["model_name"]
+  stem = safe_stem(f"{safe_stem(name)}_{model.replace('@', '_')}")
+  last_fit = session.meta.get("last_fit") or {}
+  notes: list[str] = []
+  excluded = session.meta.get("data", {}).get("excluded_points_without_dI")
+  if excluded:
+    notes.append(dropped_points_note(excluded))
+  known = session.meta.get("fixed_parameters") or {}
+  if known:
+    notes.append(
+      "Held at values supplied as known: "
+      + ", ".join(f"{key} = {value:g}" for key, value in known.items())
+      + "."
+    )
+  candidate = next(
+    (
+      item
+      for item in session.meta.get("candidates") or []
+      if item.get("model") == model
+    ),
+    {},
+  )
+  notes += list(candidate.get("procedure_notes") or [])
+  for item in session.meta.get("pending_changes") or []:
+    notes.append(f"Changed after this fit and not included: {item}.")
+  built = build_notebook(
+    analysis,
+    title=f"{name} · {model}",
+    stem=stem,
+    reduced_chisq=(last_fit.get("statistics") or {}).get("reduced_chisq"),
+    verdict=(last_fit.get("diagnostics") or {}).get("verdict"),
+    notes=notes,
+  )
+  written: dict[str, Path] = {}
+  for file_name, text in built["files"].items():
+    path = output_dir / file_name
+    path.write_text(text, encoding="utf-8")
+    written[file_name] = path
+  notebook_path = output_dir / f"{stem}.ipynb"
+  notebook_path.write_text(
+    json.dumps(built["notebook"], indent=1, ensure_ascii=False), encoding="utf-8"
+  )
+  written[notebook_path.name] = notebook_path
+  return written
+
+
 def export_session(
   session_id: str,
   user_id: str | None,
@@ -1085,18 +1138,12 @@ def export_session(
       fitter.save_analysis(str(analysis_path))
     artifacts[analysis_path.name] = analysis_path
 
-    if has_fit:
-      rows = build_parameter_export(
-        model=model_expression(session) or "",
-        params=fitter.params,
-        fit_result=fitter.fit_result or {},
-      )
-      parameters_path = output_dir / "sasview_parameter_values.txt"
-      parameters_path.write_text(
-        serialize_sasview_parameter_values(rows), encoding="utf-8"
-      )
-      artifacts[parameters_path.name] = parameters_path
+    try:
+      artifacts.update(_write_notebook(session, analysis_path, output_dir))
+    except Exception as exc:  # the report and analysis file stand
+      session.log("notebook_failed", error=str(exc)[:200])
 
+    if has_fit:
       if include_plot:
         plot_path = output_dir / "fit_plot.png"
         try:
@@ -1127,6 +1174,8 @@ def export_session(
     ".md": "text/markdown",
     ".json": "application/json",
     ".txt": "text/plain",
+    ".ipynb": "application/x-ipynb+json",
+    ".csv": "text/csv",
     ".png": "image/png",
     ".html": "text/html",
   }

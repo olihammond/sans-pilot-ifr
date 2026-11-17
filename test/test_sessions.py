@@ -83,12 +83,11 @@ def test_session_persists_model_parameters_and_fit_between_calls(workspace):
   exported = sessions.export_session(
     session_id, None, workspace / "export", include_plot=False
   )
-  assert set(exported["artifacts"]) == {
-    "report.md",
-    "analysis.json",
-    "sasview_parameter_values.txt",
-    "report.html",
-  }
+  names = set(exported["artifacts"])
+  notebooks = {name for name in names if name.endswith("_sphere.ipynb")}
+  assert len(notebooks) == 1
+  data_file = next(iter(notebooks)).replace(".ipynb", "_data.csv")
+  assert names == {"report.md", "analysis.json", "report.html", data_file} | notebooks
   page = (workspace / "export" / "report.html").read_text(encoding="utf-8")
   assert "Plotly.newPlot" in page and "Fitted parameters" in page
   assert "<td>radius</td>" in page
@@ -357,7 +356,7 @@ def test_export_reports_the_last_fit_when_settings_changed_afterwards(workspace)
     session_id, None, workspace / "export", include_plot=False
   )
   assert exported["summary"]["unfitted_changes"] == ["scale: vary=False"]
-  assert "sasview_parameter_values.txt" in exported["artifacts"]
+  assert any(name.endswith(".ipynb") for name in exported["artifacts"])
   report = (workspace / "export" / "report.md").read_text(encoding="utf-8")
   assert "Settings changed after this fit and not fitted" in report
   assert "χ²/dof" in report
@@ -902,3 +901,82 @@ def test_points_with_zero_uncertainty_are_excluded_not_fatal(workspace):
   assert "2 point(s) with zero or missing intensity uncertainty" in report
   page = (workspace / "export" / "report.html").read_text(encoding="utf-8")
   assert "zero or missing intensity uncertainty" in page
+
+
+def _run_notebook(path):
+  """Execute a notebook's code cells (without plots) in its own folder."""
+  import contextlib
+  import io
+  import json
+  import os
+  import warnings
+
+  notebook = json.loads(path.read_text(encoding="utf-8"))
+  namespace: dict = {}
+  printed = io.StringIO()
+  cwd = os.getcwd()
+  os.chdir(path.parent)
+  try:
+    for cell in notebook["cells"]:
+      if cell["cell_type"] != "code":
+        continue
+      source = "\n".join(
+        line
+        for line in cell["source"].splitlines()
+        if not line.strip().startswith("fitter.plot")
+      )
+      with contextlib.redirect_stdout(printed), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        exec(compile(source, cell["id"], "exec"), namespace)
+  finally:
+    os.chdir(cwd)
+  return notebook, namespace, printed.getvalue()
+
+
+@pytest.mark.parametrize("with_uncertainty", [True, False])
+def test_exported_notebook_reproduces_and_refits_the_session(
+  workspace, with_uncertainty
+):
+  import re
+
+  import numpy as np
+
+  data = examples.simulate(
+    "sphere", seed=5, npoints=90, qmin=0.005, qmax=0.3, radius=50, scale=0.05
+  )
+  columns = [data.x, data.y] + ([data.dy] if with_uncertainty else [])
+  np.savetxt(
+    workspace / "uploads" / "spheres.csv",
+    np.c_[tuple(columns)],
+    delimiter=",",
+    header="Q,I,dI" if with_uncertainty else "Q,I",
+    comments="",
+  )
+  session_id = sessions.create_session(file="spheres.csv", example=None, user_id=None)[
+    "session_id"
+  ]
+  procedure.fit_suggestions(session_id, None, 1, "sphere", False)
+  sessions.set_q_range(session_id, q_min=0.01, q_max=0.25, user_id=None)
+  fitted = sessions.run_fit(session_id, method="lm", user_id=None)
+  exported = sessions.export_session(
+    session_id, None, workspace / "export", include_plot=False
+  )
+
+  notebook_path = next(
+    path for name, path in exported["artifacts"].items() if name.endswith(".ipynb")
+  )
+  notebook, namespace, printed = _run_notebook(notebook_path)
+
+  source = "\n".join(cell["source"] for cell in notebook["cells"])
+  assert "set_q_range(qmin=0.01, qmax=0.25)" in source
+  assert ("set_weighting('abs')" in source) is (not with_uncertainty)
+  match = re.search(r"χ²/dof = ([0-9.eE+-]+) over", printed)
+  assert match is not None, printed
+  reproduced = float(match.group(1))
+  expected = fitted["statistics"]["reduced_chisq"]
+  assert reproduced == pytest.approx(expected, rel=1e-4)
+  refit = namespace["result"]
+  assert refit["reduced_chisq"] == pytest.approx(expected, rel=1e-3)
+  assert refit["parameters"]["radius"]["value"] == pytest.approx(
+    fitted["fitted"]["radius"]["value"], rel=1e-3
+  )
