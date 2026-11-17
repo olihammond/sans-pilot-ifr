@@ -47,6 +47,9 @@ MAX_CANDIDATES = 6
 MAX_BASELINES = 2
 CANDIDATE_FIT_SECONDS = 20.0
 CANDIDATE_METHOD_SECONDS = 30.0
+EXTRA_STARTS = 6
+RESTART_SECONDS = 25.0
+RESTART_MAX_CURVE_SECONDS = 0.5
 DEFAULT_FIT_STEPS = 200
 LIMITED_FIT_STEPS = 30
 RANKING_NOTE = (
@@ -144,8 +147,63 @@ def _apply_q_range(fitter: IQuana, session: Session) -> None:
     fitter.set_q_range(qmin=q_range.get("q_min"), qmax=q_range.get("q_max"))
 
 
-def _solve_scale_background(fitter: IQuana) -> None:
-  """Set scale and background by weighted linear least squares."""
+def alternative_starts(
+  parameters: dict[str, Any], expression: str, count: int
+) -> list[dict[str, float]]:
+  """Propose other starting points for the free structural parameters.
+
+  The first proposal mirrors every size about their geometric mean (which
+  turns a prolate start into an oblate one); the rest are log-uniform draws
+  inside the current bounds.  Draws are seeded by the model name so repeated
+  runs give the same result.
+  """
+  free = {
+    name: row
+    for name, row in parameters.items()
+    if row.get("vary") and name not in ("scale", "background")
+  }
+  usable = {
+    name: (float(row["value"]), float(row["min"]), float(row["max"]))
+    for name, row in free.items()
+    if row.get("min") is not None
+    and row.get("max") is not None
+    and float(row["min"]) > 0
+    and math.isfinite(float(row["max"]))
+    and float(row["value"]) > 0
+  }
+  if not usable:
+    return []
+  starts: list[dict[str, float]] = []
+  if len(usable) >= 2:
+    centre = math.exp(
+      sum(math.log(value) for value, _, _ in usable.values()) / len(usable)
+    )
+    starts.append(
+      {
+        name: min(max(centre * centre / value, low * 1.001), high * 0.999)
+        for name, (value, low, high) in usable.items()
+      }
+    )
+  seed = sum(ord(character) for character in expression)
+  generator = np.random.default_rng(seed)
+  while len(starts) < count:
+    starts.append(
+      {
+        name: float(
+          math.exp(generator.uniform(math.log(low * 1.001), math.log(high * 0.999)))
+        )
+        for name, (_, low, high) in usable.items()
+      }
+    )
+  return starts[:count]
+
+
+def _solve_scale_background(fitter: IQuana, keep_bounds: bool = False) -> None:
+  """Set scale and background by weighted linear least squares.
+
+  With ``keep_bounds`` the solved values are clipped into the existing bounds
+  (used for restarts, where the bounds are already chosen).
+  """
   if "scale" not in fitter.params or "background" not in fitter.params:
     return
   arrays = active_arrays(fitter.data)
@@ -169,8 +227,14 @@ def _solve_scale_background(fitter: IQuana) -> None:
     design, arrays["i"][finite] * weight[finite], rcond=None
   )
   if math.isfinite(scale) and scale > 0 and math.isfinite(background):
-    fitter.set_param("scale", value=float(scale))
-    fitter.set_param("background", value=float(background))
+    values = {"scale": float(scale), "background": float(background)}
+    for name, value in values.items():
+      row = fitter.params[name]
+      low, high = row.get("min"), row.get("max")
+      if keep_bounds and low is not None and high is not None:
+        span = float(high) - float(low)
+        value = min(max(value, float(low) + 1e-6 * span), float(high) - 1e-6 * span)
+      fitter.set_param(name, value=value)
 
 
 def parse_fixed_parameters(text: str | None) -> dict[str, float]:
@@ -275,6 +339,22 @@ def _configure_candidate(
   return notes
 
 
+def _fit_budget(fitter: IQuana) -> tuple[dict[str, Any], float, int]:
+  """Cap iterations from the measured cost of one curve.
+
+  Every candidate gets the same time budget, so a slow model (numerical
+  integration, polydispersity, smearing) cannot stall the procedure.
+  Returns (fit options, seconds per curve, number of free parameters).
+  """
+  fitter.calculate()
+  timer = time.perf_counter()
+  fitter.calculate()
+  per_curve = max(time.perf_counter() - timer, 1e-4)
+  free = sum(1 for row in fitter.params.values() if row.get("vary"))
+  steps = int(CANDIDATE_FIT_SECONDS / (per_curve * (free + 2)))
+  return {"steps": max(2, min(steps, DEFAULT_FIT_STEPS))}, per_curve, free
+
+
 def _fit_candidate(
   session: Session,
   model: str,
@@ -300,17 +380,8 @@ def _fit_candidate(
       # Library starts are already polished, so LM converges directly (simplex
       # is the fallback).  From model defaults, a simplex search runs first.
       methods = ("lm", "amoeba") if start is not None else ("amoeba", "lm")
-      # Give every candidate the same time budget: iterations are capped from
-      # the measured cost of one curve, so a slow model (numerical integration,
-      # polydispersity, smearing) cannot stall the procedure.
-      fitter.calculate()
-      timer = time.perf_counter()
-      fitter.calculate()
-      per_curve = max(time.perf_counter() - timer, 1e-4)
-      free = sum(1 for row in fitter.params.values() if row.get("vary"))
-      steps = int(CANDIDATE_FIT_SECONDS / (per_curve * (free + 2)))
-      options: dict[str, Any] = {"steps": max(2, min(steps, DEFAULT_FIT_STEPS))}
-      if steps < LIMITED_FIT_STEPS:
+      options, per_curve, free = _fit_budget(fitter)
+      if options["steps"] < LIMITED_FIT_STEPS:
         notes.append(
           f"{expression} is slow to evaluate ({per_curve:.2f} s per curve): its "
           f"automatic fit was limited to {options['steps']} iterations. Refine "
@@ -329,6 +400,44 @@ def _fit_candidate(
           break
       if fit_result is None:
         raise RuntimeError("; ".join(notes) or "no fit result")
+
+      # A single start can settle in a local minimum (for example the prolate
+      # solution for an oblate ellipsoid).  Cheap models are refitted from a
+      # few other starting points inside the same bounds; the best fit wins.
+      restarts = 0
+      has_spread = bool((start or {}).get("polydispersity"))
+      if free > 2 and (per_curve <= RESTART_MAX_CURVE_SECONDS or has_spread):
+        best = float(fit_result.get("chisq", math.inf))
+        deadline = time.perf_counter() + RESTART_SECONDS
+        # The library's polydispersity comes from a coarse scan and is held
+        # fixed, which can blur the shape; restarts are monodisperse, and the
+        # first one repeats the original start without the size distribution.
+        trials: list[dict[str, float]] = [{}] if has_spread else []
+        trials += alternative_starts(fitter.params, expression, EXTRA_STARTS)
+        plain = {**start, "polydispersity": {}} if start is not None else None
+        for trial in trials:
+          if time.perf_counter() > deadline:
+            break
+          restarts += 1
+          try:
+            other = new_fitter(session, model, structure_factor)
+            _configure_candidate(other, expression, plain, fixed)
+            for name, value in trial.items():
+              other.set_param(name, value=value)
+            _solve_scale_background(other, keep_bounds=True)
+            other_options, other_cost, _ = _fit_budget(other)
+            if other_cost > RESTART_MAX_CURVE_SECONDS:
+              break
+            with time_limit(CANDIDATE_METHOD_SECONDS):
+              other_result = other.fit(engine="bumps", method="lm", **other_options)
+          except Exception:
+            continue
+          chisq = float(other_result.get("chisq", math.inf))
+          if math.isfinite(chisq) and chisq < best * (1.0 - 1e-4):
+            best, fitter, fit_result = chisq, other, other_result
+            candidate["improved_by_restart"] = True
+            candidate.pop("limited_iterations", None)
+      candidate["starts_tried"] = restarts + 1
       summary = summarize_fit(fitter, fit_result)
   except Exception as exc:
     candidate["error"] = f"fit failed: {str(exc)[:200]}"
@@ -399,6 +508,7 @@ def _select(session: Session, expression: str) -> dict[str, Any]:
   summaries = session.meta.get("candidate_summaries") or {}
   session.meta["last_fit"] = summaries.get(expression)
   session.meta["conditional_on"] = []
+  session.meta["fixed_after_fit"] = {}
   session.mark_fitted()
   return session.meta["last_fit"] or {}
 

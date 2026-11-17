@@ -389,7 +389,7 @@ def test_fixing_a_parameter_at_its_fitted_value_is_flagged(workspace):
     )
 
   flagged = fix("scale")
-  assert "fixed at its own fitted value" in flagged["warning"]
+  assert "fixed at the value the last fit gave it" in flagged["warning"]
   refit = sessions.run_fit(session_id, method="lm", user_id=None)
   assert refit["conditional_on"] == ["scale"]
   assert refit["diagnostics"]["verdict"] != "good"
@@ -399,7 +399,15 @@ def test_fixing_a_parameter_at_its_fitted_value_is_flagged(workspace):
   page = (workspace / "export" / "report.html").read_text(encoding="utf-8")
   assert "Uncertainties are conditional." in page
 
-  # Supplying a known value, or freeing the parameter, clears the flag.
+  # A rounded copy of the fitted value is still the fitted value.
+  fitted_scale = refit["fixed"]["scale"]
+  fix("scale", vary=True)
+  again = sessions.run_fit(session_id, method="lm", user_id=None)
+  rounded = float(f"{again['fitted']['scale']['value']:.3g}")
+  assert "warning" in fix("scale", value=rounded)
+  assert fitted_scale > 0
+
+  # A genuinely different value, or freeing the parameter, clears the flag.
   known = fix("scale", value=1.0)
   assert "warning" not in known and "widened" in known["bounds_note"]
   assert "warning" in fix("background")

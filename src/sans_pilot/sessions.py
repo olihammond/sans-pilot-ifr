@@ -324,22 +324,59 @@ def _next_steps(session: Session) -> list[str]:
 def _track_conditional(
   session: Session, name: str, *, value: float | None, vary: bool | None
 ) -> str | None:
-  """Notice a parameter being fixed at the value the last fit gave it."""
+  """Notice a fitted parameter being fixed at (or near) the value the fit gave.
+
+  Fixing a parameter at its own fitted value, exactly or rounded, leaves the
+  fit unchanged and only shrinks the other uncertainties.  A supplied value
+  counts as independent only when it differs from the fitted value by more
+  than the fit's own uncertainty, or when the user declared it through
+  ``fixed_parameters``.
+  """
   conditional = session.meta.setdefault("conditional_on", [])
+  record = session.meta.setdefault("fixed_after_fit", {})
   fitted = (session.meta.get("last_fit") or {}).get("fitted") or {}
-  if vary is True or value is not None:
+  declared = name in (session.meta.get("fixed_parameters") or {})
+
+  if vary is True:
     if name in conditional:
       conditional.remove(name)
+    record.pop(name, None)
     return None
-  if vary is False and name in fitted and name not in conditional:
-    conditional.append(name)
-  if name in conditional:
+  previous = fitted.get(name)
+  if vary is not False or previous is None:
+    # Not a newly fixed fitted parameter; an explicit new value on an already
+    # fixed one replaces whatever was recorded.
+    if value is not None and name in record:
+      record[name]["value"] = value
+    return None
+
+  fit_value, fit_error = previous.get("value"), previous.get("stderr")
+  record[name] = {
+    "value": fit_value if value is None else value,
+    "fitted_value": fit_value,
+    "fitted_stderr": fit_error,
+  }
+  tolerance = 0.0
+  if isinstance(fit_value, (int, float)):
+    tolerance = 0.02 * abs(fit_value)
+    if isinstance(fit_error, (int, float)) and math.isfinite(fit_error):
+      tolerance = max(tolerance, abs(fit_error))
+  same = value is None or (
+    isinstance(fit_value, (int, float)) and abs(value - fit_value) <= tolerance
+  )
+  if same and not declared:
+    if name not in conditional:
+      conditional.append(name)
     return (
-      f"{name} is now fixed at its own fitted value. This cannot improve the "
-      "fit: chi-squared stays the same while the other uncertainties shrink "
-      "and correlations with it disappear from the report. Do this only if "
-      f"the value is known independently; otherwise set {name} vary=true again."
+      f"{name} is now fixed at the value the last fit gave it "
+      f"({fit_value} ± {fit_error}). This cannot improve the fit: chi-squared "
+      "stays the same while the other uncertainties shrink and correlations "
+      "with it disappear. The next fit will be marked as having conditional "
+      "uncertainties. Fix a parameter only at a value known independently of "
+      f"this fit; otherwise set {name} vary=true again."
     )
+  if name in conditional:
+    conditional.remove(name)
   return None
 
 
@@ -480,6 +517,7 @@ def set_model(
   session.meta["last_fit"] = None
   session.meta["pending_changes"] = []
   session.meta["conditional_on"] = []
+  session.meta["fixed_after_fit"] = {}
   session.fitted_path.unlink(missing_ok=True)
   save_fitter(session, fitter)
   session.log("set_model", model=model_expression(session))
@@ -849,6 +887,20 @@ def report_markdown(session: Session, fitter: IQuana | None) -> str:
       lines += [
         f"| {name} | {entry['value']} | {entry['stderr']} |"
         for name, entry in last_fit.get("fitted", {}).items()
+      ]
+    fixed_later = meta.get("fixed_after_fit") or {}
+    if fixed_later:
+      lines += [
+        "",
+        "Parameters fixed after having been fitted:",
+        "",
+        "| Parameter | Fixed at | Previously fitted |",
+        "|---|---|---|",
+        *[
+          f"| {name} | {entry['value']} | {entry['fitted_value']} ± "
+          f"{entry['fitted_stderr']} |"
+          for name, entry in fixed_later.items()
+        ],
       ]
     pending = meta.get("pending_changes") or []
     if pending:

@@ -288,7 +288,7 @@ def test_report_says_when_the_models_turn_changed_nothing(tmp_path, monkeypatch)
   )
 
   warned = next(m for m in requests[1]["messages"] if m["role"] == "tool")
-  assert "fixed at its own fitted value" in warned["content"]
+  assert "fixed at the value the last fit gave it" in warned["content"]
   report = result.report.read_text(encoding="utf-8")
   assert "did not change the fit" in report
   assert "Uncertainties are conditional:** scale" in report

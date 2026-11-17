@@ -286,6 +286,23 @@ def build_html_report(
         )
         + "</details>"
       )
+    fixed_later = meta.get("fixed_after_fit") or {}
+    if fixed_later:
+      parts.append(
+        "<p><b>Fixed after having been fitted</b></p>"
+        + _table(
+          ["Parameter", "Fixed at", "Previously fitted"],
+          [
+            [
+              _e(key),
+              _num(entry.get("value"), 6),
+              f"{_num(entry.get('fitted_value'), 6)} ± "
+              f"{_num(entry.get('fitted_stderr'), 3)}",
+            ]
+            for key, entry in fixed_later.items()
+          ],
+        )
+      )
     known = meta.get("fixed_parameters") or {}
     if known:
       parts.append(
@@ -375,6 +392,186 @@ def build_html_report(
     "<!doctype html><html lang=en><head><meta charset=utf-8>"
     "<meta name=viewport content='width=device-width, initial-scale=1'>"
     f"<title>SANS analysis: {_e(name)}</title><style>{_STYLE}</style></head><body>"
+    + "\n".join(parts)
+    + "</body></html>"
+  )
+
+
+def series_markdown(summary: dict[str, Any], fit_report: str) -> str:
+  """Write a joint series analysis as Markdown."""
+  fit = summary["selected_fit"]
+  statistics = fit["statistics"]
+  lines = [
+    f"# SANS series analysis: {len(summary['files'])} curves",
+    "",
+    f"- Selected model: `{summary['selected_model']}`",
+    f"- Verdict: **{fit['verdict']}** (joint χ²/dof {statistics['reduced_chisq']})",
+    f"- Reference curve for model suggestions: {summary['reference_file']}",
+  ]
+  if summary.get("fixed_parameters"):
+    lines.append(f"- Known values (all curves): {summary['fixed_parameters']}")
+  if summary.get("note"):
+    lines.append(f"- {summary['note']}")
+  lines += [
+    "",
+    "## Shared parameters",
+    "",
+    "| Parameter | Value | Std. error |",
+    "|---|---|---|",
+    *[
+      f"| {name} | {row['value']} | {row['stderr']} |"
+      for name, row in fit["shared"].items()
+    ],
+    "",
+    "## Curves",
+    "",
+    "| File | Known values | Background | χ²/N |",
+    "|---|---|---|---|",
+    *[
+      f"| {item['file']} | "
+      + (", ".join(f"{k}={v:g}" for k, v in item["known"].items()) or "-")
+      + f" | {item.get('background', '-')} | {item.get('reduced_chisq')} |"
+      for item in fit["datasets"]
+    ],
+    "",
+    "## Models compared (joint fits)",
+    "",
+    "| Rank | Model | χ²/dof | BIC | Free | Worst curve χ²/N | Origin |",
+    "|---|---|---|---|---|---|---|",
+    *[
+      "| {rank} | {model} | {chi} | {bic} | {free} | {worst} | {origin} |".format(
+        rank=item.get("rank", "-"),
+        model=item["model"],
+        chi=item.get("reduced_chisq", item.get("error", "-")),
+        bic=item.get("bic", "-"),
+        free=item.get("n_free", "-"),
+        worst=item.get("worst_curve_reduced_chisq", "-"),
+        origin=item.get("origin", ""),
+      )
+      for item in summary["candidates"]
+    ],
+    "",
+    summary["ranking"],
+    "",
+    summary["caution"],
+  ]
+  if fit["issues"]:
+    lines += ["", "## Issues", ""] + [f"- {item}" for item in fit["issues"]]
+  lines += ["", "## Full fit report", "", fit_report]
+  return "\n".join(lines) + "\n"
+
+
+def build_series_html(summary: dict[str, Any], figure: Any | None) -> str:
+  """Return a joint series analysis as one self-contained HTML page."""
+  fit = summary["selected_fit"]
+  statistics = fit["statistics"]
+  verdict = fit["verdict"]
+  parts: list[str] = [
+    f"<h1>SANS series analysis: {len(summary['files'])} curves</h1>",
+    f"<p class=sub>{_e(', '.join(summary['files']))}</p>",
+    "<div class=cards>",
+    f"<div class=card><span>Selected model</span><b>{_e(summary['selected_model'])}</b></div>",
+    f"<div class=card><span>Verdict</span><b class={_e(verdict)}>{_e(verdict)}</b></div>",
+    f"<div class=card><span>Joint χ²/dof</span><b>{_num(statistics['reduced_chisq'])}</b></div>",
+    f"<div class=card><span>Free parameters</span><b>{_e(statistics['n_free'])}</b></div>",
+    f"<div class=card><span>Starts tried</span><b>{_e(fit['starts_tried'])}</b></div>",
+    "</div>",
+  ]
+  if summary.get("note"):
+    parts.append(f"<div class=note>{_e(summary['note'])}</div>")
+
+  if figure is not None:
+    parts.append("<h2>Joint fit</h2>")
+    parts.append(_figure_html(figure, first=True))
+
+  parts.append("<h2>Shared parameters</h2>")
+  parts.append(
+    _table(
+      ["Parameter", "Value", "Std. error", "Relative"],
+      [
+        [
+          _e(name),
+          _num(row.get("value"), 6),
+          _num(row.get("stderr"), 3),
+          (
+            _num(100 * abs(row["stderr"] / row["value"]), 2) + " %"
+            if isinstance(row.get("stderr"), (int, float))
+            and isinstance(row.get("value"), (int, float))
+            and row["value"]
+            else "–"
+          ),
+        ]
+        for name, row in fit["shared"].items()
+      ],
+    )
+  )
+  if fit.get("free_slds"):
+    parts.append(
+      "<p class=small>Fitted from the contrast variation: "
+      + _e(", ".join(fit["free_slds"]))
+      + ".</p>"
+    )
+  if summary.get("fixed_parameters"):
+    parts.append(
+      "<p class=small>Supplied as known for all curves: "
+      + _e(", ".join(f"{k} = {v:g}" for k, v in summary["fixed_parameters"].items()))
+      + "</p>"
+    )
+
+  parts.append("<h2>Curves</h2>")
+  parts.append(
+    _table(
+      ["File", "Known values", "Background", "Points", "χ²/N"],
+      [
+        [
+          _e(item["file"]),
+          _e(", ".join(f"{k} = {v:g}" for k, v in item["known"].items()) or "–"),
+          _num(item.get("background")),
+          _e(item.get("points")),
+          _num(item.get("reduced_chisq")),
+        ]
+        for item in fit["datasets"]
+      ],
+    )
+  )
+
+  parts.append("<h2>Diagnostics</h2>")
+  parts.append(
+    _list(fit["issues"]) if fit["issues"] else "<p>No issues were detected.</p>"
+  )
+
+  parts.append("<h2>Models compared (joint fits)</h2>")
+  parts.append(
+    _table(
+      ["Rank", "Model", "χ²/dof", "BIC", "Free", "Worst curve χ²/N", "Origin"],
+      [
+        [
+          _e(item.get("rank", "–")),
+          _e(item["model"]),
+          _num(item.get("reduced_chisq")) if "error" not in item else _e(item["error"]),
+          _num(item.get("bic"), 6),
+          _e(item.get("n_free", "–")),
+          _num(item.get("worst_curve_reduced_chisq")),
+          _e(item.get("origin", "")),
+        ]
+        for item in summary["candidates"]
+      ],
+      selected=next(
+        (
+          index
+          for index, item in enumerate(summary["candidates"])
+          if item["model"] == summary["selected_model"]
+        ),
+        None,
+      ),
+    )
+  )
+  parts.append(f"<p class=small>{_e(summary['ranking'])} {_e(summary['caution'])}</p>")
+  parts.append(EXTRA_MARKER)
+  return (
+    "<!doctype html><html lang=en><head><meta charset=utf-8>"
+    "<meta name=viewport content='width=device-width, initial-scale=1'>"
+    f"<title>SANS series analysis</title><style>{_STYLE}</style></head><body>"
     + "\n".join(parts)
     + "</body></html>"
   )

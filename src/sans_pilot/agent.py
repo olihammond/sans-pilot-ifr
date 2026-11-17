@@ -88,6 +88,8 @@ class AgentConfig:
 
   out: Path
   data: Path | None = None
+  series: list[Path] = field(default_factory=list)
+  per_file_parameters: str | None = None
   example: str | None = None
   model: str | None = None
   base_url: str = DEFAULT_BASE_URL
@@ -627,6 +629,179 @@ async def run_agent(
   return result
 
 
+SERIES_PROMPT = """
+You are summarising a joint fit of several small-angle neutron scattering
+curves measured on the same particles. The analysis is finished; its result is
+in the user message. Do not ask for tools.
+
+Write a short interpretation: the model chosen and why it beat the others,
+each shared fitted value with its uncertainty and unit (lengths in angstrom,
+SLDs in 1e-6 per square angstrom), the joint reduced chi-squared and verdict,
+how evenly the curves are fitted, and any issues or doubts.
+
+Rules:
+- Quote numbers exactly as given. Never invent values.
+- A low chi-squared means a model CAN describe the data, not that it is right.
+- Mention candidates marked close_to_best: the data does not separate them.
+""".strip()
+
+
+async def run_series(
+  config: AgentConfig,
+  *,
+  transport: httpx.AsyncBaseTransport | None = None,
+  log: Callable[[str], None] = print,
+) -> AgentResult:
+  """Run the joint series procedure and write the results."""
+  config.out.mkdir(parents=True, exist_ok=True)
+  _prepare_workspace(config)
+  uploads = Path(os.environ["UPLOAD_DIR"])
+  names: list[str] = []
+  for path in config.series:
+    if not path.is_file():
+      raise FileNotFoundError(f"Data file not found: {path}")
+    shutil.copyfile(path, uploads / path.name)
+    names.append(path.name)
+  if len(set(names)) != len(names):
+    raise ValueError("Series files must have distinct names.")
+
+  from sans_pilot.report_html import EXTRA_MARKER, markdown_to_html
+  from sans_pilot.series import series_analysis
+  from sans_pilot.workers import run_cancellable_worker
+
+  log(f"Running joint analysis of {len(names)} curves (suggest, fit jointly, rank)...")
+  try:
+    outcome = await run_cancellable_worker(
+      series_analysis,
+      names,
+      None,
+      config.per_file_parameters,
+      config.fixed_parameters,
+      config.top,
+      config.extra_models,
+      config.out,
+      config.plot,
+      operation_name="series-analysis",
+    )
+  except Exception as exc:
+    raise ValueError(f"Series analysis failed: {exc}") from exc
+  summary = outcome["summary"]
+  fit = summary["selected_fit"]
+  for candidate in summary["candidates"]:
+    log(
+      "  {rank}. {model}: {detail}".format(
+        rank=candidate.get("rank", "-"),
+        model=candidate["model"],
+        detail=candidate.get("error")
+        or f"joint chi2/dof {candidate.get('reduced_chisq')} ({candidate.get('verdict')})",
+      )
+    )
+  for name, row in fit["shared"].items():
+    log(f"  {name} = {row['value']} ± {row['stderr']}")
+
+  interpretation = note = None
+  steps = 0
+  if config.model:
+    log(f"Asking {config.model} for an interpretation ...")
+    brief = {
+      key: summary.get(key)
+      for key in (
+        "files",
+        "per_file_parameters",
+        "fixed_parameters",
+        "candidates",
+        "ranking",
+        "selected_model",
+        "selected_fit",
+        "note",
+      )
+    }
+    messages = [
+      {"role": "system", "content": SERIES_PROMPT},
+      {
+        "role": "user",
+        "content": (
+          "What is known about the sample: "
+          + (config.sample.strip() or "nothing was provided.")
+          + "\n\nJoint analysis result:\n"
+          + json.dumps(brief, ensure_ascii=False, default=str)
+        ),
+      },
+    ]
+    try:
+      async with httpx.AsyncClient(
+        base_url=config.base_url.rstrip("/"),
+        headers={"Authorization": f"Bearer {config.api_key}"},
+        timeout=config.request_timeout,
+        transport=transport,
+      ) as http:
+        message = await _chat(http, config, messages, None)
+      interpretation = (message.get("content") or "").strip() or None
+      steps = 1
+    except (httpx.HTTPError, ValueError) as exc:
+      note = f"Model request failed: {exc}"
+      log(f"  note: {note}")
+
+  report = config.out / "report.md"
+  lines = ["", "## How this report was produced", ""]
+  produced = (
+    "Model suggestions (Sassafras curve library, from the reference curve), the "
+    "joint fits (IQuana MultiFitter, several starting points each) and the "
+    "diagnostics were computed deterministically by sans-pilot."
+  )
+  lines.append(produced)
+  page = ["<h2>How this report was produced</h2>", f"<p>{html.escape(produced)}</p>"]
+  if config.sample.strip():
+    lines.append(f"Sample description supplied by the user: {config.sample}")
+    page.append(
+      f"<p>Sample description supplied by the user: {html.escape(config.sample)}</p>"
+    )
+  if config.model:
+    disclaimer = (
+      "Written by a language model from the results above. It has not been "
+      "checked; verify numbers against the tables in this report."
+    )
+    text = interpretation or "_The model produced no interpretation._"
+    lines += [
+      "",
+      f"## Interpretation by `{config.model}`",
+      "",
+      f"_{disclaimer}_",
+      "",
+      text,
+    ]
+    page += [
+      f"<h2>Interpretation by {html.escape(config.model)}</h2>",
+      f"<div class=note>{html.escape(disclaimer)}</div>",
+      markdown_to_html(text),
+    ]
+    if note:
+      lines += ["", f"Note: {note}"]
+  with report.open("a", encoding="utf-8") as handle:
+    handle.write("\n".join(lines) + "\n")
+  html_report = report.with_suffix(".html")
+  if html_report.is_file():
+    html_report.write_text(
+      html_report.read_text(encoding="utf-8").replace(EXTRA_MARKER, "\n".join(page)),
+      encoding="utf-8",
+    )
+    log(f"Open:   {html_report}  (figures and tables)")
+  log(f"Model: {summary['selected_model']}  verdict: {fit['verdict']}")
+  log(f"Report: {report}")
+  return AgentResult(
+    session_id="series",
+    status="fitted",
+    model=summary["selected_model"],
+    verdict=fit["verdict"],
+    reduced_chisq=fit["statistics"]["reduced_chisq"],
+    report=report,
+    files=sorted(outcome["artifacts"].values()),
+    interpretation=interpretation,
+    llm_note=note,
+    llm_steps=steps,
+  )
+
+
 def build_parser() -> argparse.ArgumentParser:
   parser = argparse.ArgumentParser(
     prog="sans-pilot-agent",
@@ -635,7 +810,22 @@ def build_parser() -> argparse.ArgumentParser:
       "refined by a local LLM on an OpenAI-compatible endpoint."
     ),
   )
-  parser.add_argument("data", nargs="?", type=Path, help="reduced 1D data file")
+  parser.add_argument(
+    "data",
+    nargs="*",
+    type=Path,
+    help="reduced 1D data file; give several files to fit them jointly as a series",
+  )
+  parser.add_argument(
+    "--per-file",
+    action="append",
+    default=[],
+    metavar="NAME=V1,V2,...",
+    help=(
+      "series only: a known value that differs between files, one per file in "
+      "the order given, e.g. 'sld_solvent=-0.56,2.9,6.36' (repeatable)"
+    ),
+  )
   parser.add_argument("--example", help="use a bundled IQuana example instead")
   parser.add_argument(
     "--out", type=Path, help="output folder (default: <data>_analysis)"
@@ -672,13 +862,26 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
   parser = build_parser()
   args = parser.parse_args(argv)
-  if (args.data is None) == (args.example is None):
-    parser.error("give a data file or --example NAME (exactly one)")
-  out = args.out or (
-    args.data.with_name(f"{args.data.stem}_analysis")
-    if args.data is not None
-    else Path(f"{args.example}_analysis")
-  )
+  if bool(args.data) == (args.example is not None):
+    parser.error("give data file(s) or --example NAME (not both, not neither)")
+  series = list(args.data) if len(args.data) > 1 else []
+  single = args.data[0] if len(args.data) == 1 else None
+  if args.per_file and not series:
+    parser.error("--per-file needs two or more data files")
+  per_file = []
+  for item in args.per_file:
+    name, separator, values = item.partition("=")
+    if not separator:
+      parser.error("--per-file must look like NAME=V1,V2,...")
+    per_file.append(f"{name.strip()}={values.replace(',', '/').replace(' ', '')}")
+  if args.out:
+    out = args.out
+  elif series:
+    out = series[0].with_name(f"{series[0].stem}_series_analysis")
+  elif single is not None:
+    out = single.with_name(f"{single.stem}_analysis")
+  else:
+    out = Path(f"{args.example}_analysis")
   known = [
     item
     for item in (
@@ -691,7 +894,9 @@ def main(argv: list[str] | None = None) -> int:
   config = AgentConfig(
     fixed_parameters=",".join(known) or None,
     out=out,
-    data=args.data,
+    data=single,
+    series=series,
+    per_file_parameters=",".join(per_file) or None,
     example=args.example,
     model=args.model,
     base_url=args.base_url,
@@ -705,7 +910,7 @@ def main(argv: list[str] | None = None) -> int:
     plot=not args.no_plot,
   )
   try:
-    result = asyncio.run(run_agent(config))
+    result = asyncio.run(run_series(config) if series else run_agent(config))
   except (FileNotFoundError, ValueError) as exc:
     print(f"error: {exc}", file=sys.stderr)
     return 2

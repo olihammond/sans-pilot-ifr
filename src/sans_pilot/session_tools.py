@@ -25,7 +25,11 @@ SessionId = Annotated[
 GUIDED_INSTRUCTIONS = """
 Guided SANS (small-angle neutron scattering) model fitting.
 
-Follow this procedure in order:
+If the user has several files from the same sample series (for example a
+contrast series), call `run-sans-series-analysis` once with all of them and
+report its result; do not analyse the files one at a time.
+
+For a single file, follow this procedure in order:
 1. `list-uploaded-sans-files` to find the data file (skip if the name is known).
 2. `run-sans-guided-analysis` with the file name. It loads the data, ranks
    models against a curve library, fits the top suggestions and selects the best.
@@ -150,6 +154,64 @@ async def run_sans_guided_analysis(
     fixed_parameters,
     operation_name="run-sans-guided-analysis",
   )
+
+
+def _series_worker(
+  files: list[str],
+  user_id: str | None,
+  per_file_parameters: str | None,
+  fixed_parameters: str | None,
+  top: int,
+  extra_models: str | None,
+  output_dir: Path,
+) -> dict[str, Any]:
+  from sans_pilot.series import series_analysis
+
+  return series_analysis(
+    files, user_id, per_file_parameters, fixed_parameters, top, extra_models, output_dir
+  )
+
+
+async def run_sans_series_analysis(
+  files: Annotated[
+    str,
+    Field(description="Comma-separated stored file names, e.g. 'a.dat,b.dat,c.dat'."),
+  ],
+  per_file_parameters: Annotated[
+    str | None,
+    Field(
+      description=(
+        "Known values that differ between files, one per file in file order, "
+        "e.g. 'sld_solvent=-0.56/2.9/6.36'."
+      )
+    ),
+  ] = None,
+  fixed_parameters: Annotated[
+    str | None,
+    Field(description="Known values common to all files, e.g. 'sld=4.77'."),
+  ] = None,
+  top: Annotated[int, Field(ge=1, le=procedure.MAX_CANDIDATES)] = 3,
+  extra_models: Annotated[
+    str | None,
+    Field(description="Extra models to fit too, e.g. 'ellipsoid,cylinder'."),
+  ] = None,
+) -> Any:
+  """Fit one model jointly to several curves of the same particles."""
+  output_dir = create_run_directory("run-sans-series-analysis")
+  user_id = get_user_id_from_request()
+  result = await run_cancellable_worker(
+    _series_worker,
+    [name for name in files.replace(";", ",").split(",") if name.strip()],
+    user_id,
+    per_file_parameters,
+    fixed_parameters,
+    top,
+    extra_models,
+    output_dir,
+    operation_name="run-sans-series-analysis",
+    output_dir=output_dir,
+  )
+  return artifact_result(result["summary"], result["artifacts"], user_id=user_id)
 
 
 def use_sans_candidate(
@@ -285,6 +347,15 @@ def register_session_tools(mcp: FastMCP) -> None:
       "fits and select the best. Returns a session_id for refinement."
     ),
   )(run_sans_guided_analysis)
+  mcp.tool(
+    name="run-sans-series-analysis",
+    description=(
+      "Analyse a series of curves from the same particles together (contrast, "
+      "concentration or instrument series): suggest models from the strongest "
+      "curve, fit each jointly to all curves with shared structure, rank the "
+      "joint fits. Use this instead of analysing the files one at a time."
+    ),
+  )(run_sans_series_analysis)
   mcp.tool(
     name="start-sans-analysis",
     description=(

@@ -46,6 +46,7 @@ suggested actions rather than as a plot.
 | Tool                       | Purpose                                                              |
 | -------------------------- | -------------------------------------------------------------------- |
 | `run-sans-guided-analysis` | The fixed procedure: load, suggest models, fit the top ones, rank    |
+| `run-sans-series-analysis` | The same procedure for several curves at once, fitted jointly        |
 | `start-sans-analysis`      | Load one file or example into a session and describe the curve shape |
 | `suggest-sans-models`      | Rank models against the Sassafras curve library ("Guess")            |
 | `fit-sans-suggestions`     | Fit the top suggestions, simple baselines and any `extra_models`     |
@@ -111,6 +112,47 @@ Candidates already fitted in a session are kept: a later call with
 `extra_models` fits only the new ones and re-ranks. Changing the Q range or
 the fixed parameters refits everything.
 
+### Several starting points
+
+A single start can settle in a local minimum, for example the prolate
+solution for an oblate ellipsoid. Each candidate that is cheap to evaluate is
+refitted from up to six other starting points inside the same bounds (the
+sizes mirrored about their geometric mean, then seeded log-uniform draws) and
+the best fit is kept. The library's polydispersity comes from a coarse scan
+and is held fixed, so these restarts are monodisperse; candidates report
+`starts_tried` and `improved_by_restart`.
+
+### Series of curves
+
+Curves from the same particles (a contrast series, a concentration series,
+several instrument settings) should be analysed together.
+`run-sans-series-analysis` takes all the files at once:
+
+```json
+{
+  "files": "ZnO_000.dat,ZnO_050.dat,ZnO_100.dat",
+  "per_file_parameters": "sld_solvent=-0.56/2.90/6.36",
+  "fixed_parameters": "sld=4.77"
+}
+```
+
+It takes candidate models from the curve with the best signal (Guess, simple
+baselines, `extra_models`) and fits each one jointly to every curve with
+IQuana's `MultiFitter`, from several starting points:
+
+- structural parameters are shared between curves;
+- each curve keeps its own background;
+- `per_file_parameters` are held at the given value for each file;
+- when per-file values are given, the scale is shared and any particle SLD not
+  supplied in `fixed_parameters` is fitted from the contrast variation;
+- without per-file values each curve keeps its own scale and only the
+  structure is shared.
+
+The joint fits are ranked by BIC. The output is `report.html` with all curves
+and their joint fit on one figure, `report.md`, `series_result.json`, and one
+`analysis_<file>.json` per curve holding the joint solution. Joint fits are
+monodisperse, need dI in every file, and take at most 12 files.
+
 ### Diagnostics
 
 The verdict is a heuristic computed from IQuana's fit result: `good` (reduced
@@ -121,7 +163,9 @@ systematic residuals (runs test) located at low, intermediate or high Q. The
 thresholds are returned by `get-sans-analysis` and printed in every report.
 
 Fixing a parameter at the value the last fit gave it (`vary=false` with no new
-value) leaves chi-squared unchanged while shrinking every other uncertainty.
+value, or with a value inside that fit's own uncertainty) leaves chi-squared
+unchanged while shrinking every other uncertainty. Only values declared
+through `fixed_parameters` count as independently known.
 The tools warn when this happens, the next fit is marked as having
 *conditional* uncertainties and cannot be rated `good`, and the reports say so.
 Settings changed after a fit and not refitted are listed as unfitted; reports
@@ -173,6 +217,19 @@ when the model's turn left the fit unchanged, or only changed which
 parameters were free. Tool definitions and the guided result need roughly
 3,000 tokens of context before the conversation starts, so raise the context
 length of runtimes that default lower.
+
+Give several files to analyse them jointly as a series:
+
+```bash
+sans-pilot-agent ZnO_000.dat ZnO_050.dat ZnO_100.dat \
+  --per-file "sld_solvent=-0.56,2.90,6.36" \
+  --sample "ZnO nanoparticles, H2O/D2O contrast series"
+```
+
+`--per-file NAME=V1,V2,...` gives one known value per file in the order the
+files are listed, and can be repeated for other parameters; `--fixed` gives
+values common to all files. In series mode a `--model` only writes the
+interpretation: there are no refinement tools for joint fits yet.
 
 Any MCP client can use the same tools without the runner:
 
