@@ -98,3 +98,31 @@ def test_baseline_models_follow_the_low_q_slope():
     "sphere@hardsphere"
   )
   assert baseline_models({"low_q_log_slope": None}) == []
+
+
+def test_rising_low_q_intensity_is_read_as_repulsion_not_a_plateau():
+  from sans_pilot.diagnostics import baseline_models
+
+  q = np.linspace(0.01, 0.3, 150)
+  intensity = 0.2 + 4.0 * np.exp(-((q - 0.06) ** 2) / (2 * 0.02**2))
+  features = describe_features(_data(q, intensity, 0.02 * intensity))
+
+  assert features["low_q_log_slope"] > 0.3
+  assert any("repel" in hint for hint in features["hints"])
+  assert not any("plateau" in hint for hint in features["hints"])
+  assert baseline_models(features) == ["sphere@hardsphere", "sphere@hayter_msa"]
+
+
+def test_markdown_subset_renders_tables_lists_and_escapes_html():
+  from sans_pilot.report_html import markdown_to_html
+
+  page = markdown_to_html(
+    "**Chosen model**\n\nA <b>cylinder</b> fits.\n\n"
+    "| Parameter | Value |\n|---|---|\n| radius | 18.6 |\n\n"
+    "* Reduced chi2 = **0.84**\n* Verdict: good"
+  )
+
+  assert "<b>Chosen model</b>" in page
+  assert "&lt;b&gt;cylinder&lt;/b&gt;" in page
+  assert "<th>Parameter</th>" in page and "<td>18.6</td>" in page
+  assert page.count("<li>") == 2 and "<b>0.84</b>" in page

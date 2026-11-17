@@ -85,6 +85,15 @@ async def fit_sans_suggestions(
     bool,
     Field(description="Also fit one or two simple shapes chosen from the curve."),
   ] = True,
+  fixed_parameters: Annotated[
+    str | None,
+    Field(
+      description=(
+        "Independently known values to hold fixed in every candidate, e.g. "
+        "'sld=0.4,sld_solvent=6.36'."
+      )
+    ),
+  ] = None,
 ) -> dict[str, Any]:
   """Fit the top suggested models, rank the fits, and select the best."""
   return await run_cancellable_worker(
@@ -94,6 +103,7 @@ async def fit_sans_suggestions(
     top,
     extra_models,
     include_baselines,
+    fixed_parameters,
     operation_name="fit-sans-suggestions",
   )
 
@@ -116,6 +126,15 @@ async def run_sans_guided_analysis(
     bool,
     Field(description="Also fit one or two simple shapes chosen from the curve."),
   ] = True,
+  fixed_parameters: Annotated[
+    str | None,
+    Field(
+      description=(
+        "Independently known values to hold fixed in every candidate, e.g. "
+        "'sld=0.4,sld_solvent=6.36'."
+      )
+    ),
+  ] = None,
 ) -> dict[str, Any]:
   """Run the fixed procedure: load, suggest models, fit the top ones, rank."""
   return await run_cancellable_worker(
@@ -128,6 +147,7 @@ async def run_sans_guided_analysis(
     q_min,
     q_max,
     include_baselines,
+    fixed_parameters,
     operation_name="run-sans-guided-analysis",
   )
 

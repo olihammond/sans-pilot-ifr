@@ -56,7 +56,7 @@ suggested actions rather than as a plot.
 | `set-sans-q-range`         | Restrict or reset the fitted Q range                                 |
 | `run-sans-fit`             | Fit and return statistics, a verdict, issues and suggestions         |
 | `get-sans-analysis`        | Show the session's model, parameters and last fit                    |
-| `export-sans-analysis`     | Write `report.md`, `analysis.json`, SasView parameters and the plot  |
+| `export-sans-analysis`     | Write `report.html`, `report.md`, `analysis.json` and the plot       |
 
 A session is a directory under `SANS_PILOT_RUNS_DIR/sessions/<user>/` holding
 the data and an IQuana analysis file (`IQuana.save_analysis`). Each call
@@ -101,6 +101,16 @@ python -m sassafras.library fetch      # curve library, ~290 MB, once
 Without it, `fit-sans-suggestions` asks for `extra_models` and fits those from
 the model defaults. `SANS_PILOT_GUESS=off` disables it explicitly.
 
+`fixed_parameters` (for example `"sld=0.4,sld_solvent=6.36"`) supplies
+independently known values. They replace the library's values in every
+candidate that has those parameters, stay fixed, and the scale is re-solved
+for the new contrast. Without them the SLDs are the curve library's, so
+`scale` and volume fractions carry no physical meaning.
+
+Candidates already fitted in a session are kept: a later call with
+`extra_models` fits only the new ones and re-ranks. Changing the Q range or
+the fixed parameters refits everything.
+
 ### Diagnostics
 
 The verdict is a heuristic computed from IQuana's fit result: `good` (reduced
@@ -109,6 +119,13 @@ or `uncalibrated` when the data has no dI. Issues cover parameters resting on
 a bound, |correlation| >= 0.95, standard errors above half the value, and
 systematic residuals (runs test) located at low, intermediate or high Q. The
 thresholds are returned by `get-sans-analysis` and printed in every report.
+
+Fixing a parameter at the value the last fit gave it (`vary=false` with no new
+value) leaves chi-squared unchanged while shrinking every other uncertainty.
+The tools warn when this happens, the next fit is marked as having
+*conditional* uncertainties and cannot be rated `good`, and the reports say so.
+Settings changed after a fit and not refitted are listed as unfitted; reports
+and `analysis.json` then show the last completed fit.
 
 ## Local LLM runner
 
@@ -123,7 +140,8 @@ sans-pilot-agent data.csv
 # the same API on http://localhost:1234/v1)
 sans-pilot-agent data.csv \
   --model <model-name> --base-url http://localhost:11434/v1 \
-  --sample "SDS micelles in D2O, 2 wt%, charged"
+  --sample "SDS micelles in D2O, 2 wt%, charged" \
+  --sld 0.4 --sld-solvent 6.36
 ```
 
 The runner owns loading, the guided procedure and the export. The model is
@@ -132,8 +150,13 @@ default 12): it may switch candidate, fit a model the sample suggests, adjust
 parameters and refit, then write an interpretation. Whatever the model does,
 the output folder (`<data>_analysis/` by default) receives:
 
-- `report.md` - data summary, models tried, fit report, diagnostics, steps
-  taken and, clearly marked as unverified, the model's interpretation;
+- `report.html` - the page to open: verdict, an interactive fit figure with
+  residuals, fitted values with uncertainties, diagnostics, a figure
+  overlaying every candidate on the data, and the model's interpretation. It
+  is one self-contained file (about 5 MB, works offline);
+- `report.md` - the same content as text: data summary, models tried, fit
+  report, diagnostics, steps taken and, clearly marked as unverified, the
+  model's interpretation;
 - `analysis.json` - reloadable with `IQuana.load_analysis`;
 - `analysis_guided.json` - the state before the model's turn, with a warning
   in the report if the refinement made the fit worse;
@@ -144,7 +167,10 @@ Malformed tool arguments, unknown tools and tool calls printed as text are
 handled; an endpoint that rejects tool definitions falls back to
 interpretation only, and an unreachable endpoint still yields the
 deterministic report. `--sample` matters: it is the only knowledge of the
-sample the model has. Tool definitions and the guided result need roughly
+sample the model has. `--sld`, `--sld-solvent` and `--fixed "name=value,..."`
+pass known values through as `fixed_parameters`. The report states plainly
+when the model's turn left the fit unchanged, or only changed which
+parameters were free. Tool definitions and the guided result need roughly
 3,000 tokens of context before the conversation starts, so raise the context
 length of runtimes that default lower.
 

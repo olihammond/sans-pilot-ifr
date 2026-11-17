@@ -143,6 +143,10 @@ class Session:
     shutil.copyfile(self.analysis_path, self.fitted_path)
     self.meta["pending_changes"] = []
 
+  def conditional(self) -> list[str]:
+    """Parameters currently fixed at their own fitted values."""
+    return list(self.meta.setdefault("conditional_on", []))
+
   def note_change(self, description: str) -> list[str]:
     """Record a setting changed after the last fit and not yet fitted."""
     pending = self.meta.setdefault("pending_changes", [])
@@ -317,6 +321,28 @@ def _next_steps(session: Session) -> list[str]:
   ]
 
 
+def _track_conditional(
+  session: Session, name: str, *, value: float | None, vary: bool | None
+) -> str | None:
+  """Notice a parameter being fixed at the value the last fit gave it."""
+  conditional = session.meta.setdefault("conditional_on", [])
+  fitted = (session.meta.get("last_fit") or {}).get("fitted") or {}
+  if vary is True or value is not None:
+    if name in conditional:
+      conditional.remove(name)
+    return None
+  if vary is False and name in fitted and name not in conditional:
+    conditional.append(name)
+  if name in conditional:
+    return (
+      f"{name} is now fixed at its own fitted value. This cannot improve the "
+      "fit: chi-squared stays the same while the other uncertainties shrink "
+      "and correlations with it disappear from the report. Do this only if "
+      f"the value is known independently; otherwise set {name} vary=true again."
+    )
+  return None
+
+
 def _unfitted(pending: list[str]) -> dict[str, Any]:
   """Tell the caller that changed settings only take effect after a fit."""
   result: dict[str, Any] = {"next_steps": ["run-sans-fit to fit with the new settings"]}
@@ -453,6 +479,7 @@ def set_model(
   session.meta["model"] = {"model": model, "structure_factor": structure_factor}
   session.meta["last_fit"] = None
   session.meta["pending_changes"] = []
+  session.meta["conditional_on"] = []
   session.fitted_path.unlink(missing_ok=True)
   save_fitter(session, fitter)
   session.log("set_model", model=model_expression(session))
@@ -499,9 +526,23 @@ def set_parameter(
   }
   if not changes:
     raise SessionError("Give at least one of value, min, max or vary.")
+  # A value outside its bounds cannot be saved or fitted: widen the bounds to
+  # hold it rather than leaving the session in an unusable state.
+  current = fitter.params[name]
+  low = changes.get("min", current.get("min"))
+  high = changes.get("max", current.get("max"))
+  target = changes.get("value", current.get("value"))
+  if low is not None and high is not None and float(low) > float(high):
+    raise SessionError(f"min ({low}) is larger than max ({high}) for {name}.")
+  widened = False
+  if target is not None and low is not None and float(target) < float(low):
+    changes["min"], widened = float(target), True
+  if target is not None and high is not None and float(target) > float(high):
+    changes["max"], widened = float(target), True
   with quiet_science():
     fitter.set_param(name, **changes)
   save_fitter(session, fitter)
+  warning = _track_conditional(session, name, value=value, vary=vary)
   pending = session.note_change(
     f"{name}: " + ", ".join(f"{key}={item}" for key, item in changes.items())
   )
@@ -511,6 +552,12 @@ def set_parameter(
     "session_id": session.id,
     "parameter": {name: parameter_table(fitter)[name]},
     "varying": [key for key, row in parameter_table(fitter).items() if row["vary"]],
+    **({"warning": warning} if warning else {}),
+    **(
+      {"bounds_note": f"The bounds of {name} were widened to include its value."}
+      if widened
+      else {}
+    ),
     **_unfitted(pending),
   }
 
@@ -602,7 +649,11 @@ def fit_residuals(fitter: IQuana) -> tuple[dict[str, Any], bool]:
   )
 
 
-def summarize_fit(fitter: IQuana, fit_result: dict[str, Any]) -> dict[str, Any]:
+def summarize_fit(
+  fitter: IQuana,
+  fit_result: dict[str, Any],
+  conditional_on: list[str] | None = None,
+) -> dict[str, Any]:
   """Reduce an IQuana fit result to statistics, parameters, and a verdict."""
   formatted = format_fit_result(fit_result)
   residuals, has_uncertainties = fit_residuals(fitter)
@@ -648,8 +699,12 @@ def summarize_fit(fitter: IQuana, fit_result: dict[str, Any]) -> dict[str, Any]:
     "fixed": fixed,
     "polydispersity": polydispersity_table(fitter),
     "diagnostics": assess_fit(
-      formatted, residuals, has_uncertainties=has_uncertainties
+      formatted,
+      residuals,
+      has_uncertainties=has_uncertainties,
+      conditional_on=conditional_on,
     ),
+    "conditional_on": list(conditional_on or []),
     "residuals": residuals,
   }
 
@@ -679,7 +734,7 @@ def run_fit(
       "method='amoeba', fix a poorly determined parameter, or narrow the bounds."
     ) from exc
   with quiet_science(notes):
-    summary = summarize_fit(fitter, fit_result)
+    summary = summarize_fit(fitter, fit_result, session.conditional())
   save_fitter(session, fitter)
   session.meta["last_fit"] = summary
   session.mark_fitted()
@@ -888,6 +943,19 @@ def export_session(
         except Exception as exc:  # rendering needs a browser; the report stands
           session.log("plot_failed", error=str(exc)[:200])
 
+  html_path = output_dir / "report.html"
+  try:
+    from sans_pilot.report_html import build_html_report
+
+    with quiet_science():
+      page = build_html_report(
+        session, fitter, model=model_expression(session), has_fit=has_fit
+      )
+    html_path.write_text(page, encoding="utf-8")
+    artifacts[html_path.name] = html_path
+  except Exception as exc:  # the Markdown report and analysis file stand
+    session.log("html_report_failed", error=str(exc)[:200])
+
   session.log("export", files=sorted(artifacts))
   session.save()
   mime_types = {
@@ -895,6 +963,7 @@ def export_session(
     ".json": "application/json",
     ".txt": "text/plain",
     ".png": "image/png",
+    ".html": "text/html",
   }
   return {
     "summary": {

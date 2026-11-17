@@ -87,7 +87,11 @@ def test_session_persists_model_parameters_and_fit_between_calls(workspace):
     "report.md",
     "analysis.json",
     "sasview_parameter_values.txt",
+    "report.html",
   }
+  page = (workspace / "export" / "report.html").read_text(encoding="utf-8")
+  assert "Plotly.newPlot" in page and "Fitted parameters" in page
+  assert "<td>radius</td>" in page
   report = (workspace / "export" / "report.md").read_text(encoding="utf-8")
   assert "## Diagnostics" in report and "## Steps taken" in report
   reloaded = IQuana.load_analysis(str(workspace / "export" / "analysis.json"))
@@ -365,3 +369,109 @@ def test_export_reports_the_last_fit_when_settings_changed_afterwards(workspace)
   # Refitting clears the pending list.
   sessions.run_fit(session_id, method="lm", user_id=None)
   assert "unfitted_changes" not in sessions.session_status(session_id, user_id=None)
+
+
+def test_fixing_a_parameter_at_its_fitted_value_is_flagged(workspace):
+  session_id = sessions.create_session(file=None, example="sphere", user_id=None)[
+    "session_id"
+  ]
+  procedure.fit_suggestions(session_id, None, 1, "sphere")
+
+  def fix(name, value=None, vary=False):
+    return sessions.set_parameter(
+      session_id,
+      name=name,
+      value=value,
+      minimum=None,
+      maximum=None,
+      vary=vary,
+      user_id=None,
+    )
+
+  flagged = fix("scale")
+  assert "fixed at its own fitted value" in flagged["warning"]
+  refit = sessions.run_fit(session_id, method="lm", user_id=None)
+  assert refit["conditional_on"] == ["scale"]
+  assert refit["diagnostics"]["verdict"] != "good"
+  assert "Uncertainties are conditional: scale" in refit["diagnostics"]["issues"][0]
+
+  sessions.export_session(session_id, None, workspace / "export", include_plot=False)
+  page = (workspace / "export" / "report.html").read_text(encoding="utf-8")
+  assert "Uncertainties are conditional." in page
+
+  # Supplying a known value, or freeing the parameter, clears the flag.
+  known = fix("scale", value=1.0)
+  assert "warning" not in known and "widened" in known["bounds_note"]
+  assert "warning" in fix("background")
+  assert "warning" not in fix("background", vary=True)
+  cleared = sessions.run_fit(session_id, method="lm", user_id=None)
+  assert cleared["conditional_on"] == []
+
+
+def test_known_values_are_held_fixed_in_every_candidate(workspace):
+  session_id = sessions.create_session(file=None, example="sphere", user_id=None)[
+    "session_id"
+  ]
+  with pytest.raises(sessions.SessionError, match="name=number"):
+    procedure.fit_suggestions(session_id, None, 1, "sphere", True, "sld")
+
+  free = procedure.fit_suggestions(session_id, None, 1, "sphere")
+  result = procedure.fit_suggestions(
+    session_id, None, 1, "sphere", True, "sld=2.5, sld_solvent=6.36"
+  )
+
+  assert result["fixed_parameters"] == {"sld": 2.5, "sld_solvent": 6.36}
+  assert result["newly_fitted"] == ["sphere"]  # new known values: refit
+  fixed = result["selected_fit"]["fixed"]
+  assert (fixed["sld"], fixed["sld_solvent"]) == (2.5, 6.36)
+  # Same curve, different contrast: the scale absorbs (5 / 3.86)^2 and the
+  # fit quality is unchanged.
+  before = free["candidates"][0]
+  after = result["candidates"][0]
+  assert after["reduced_chisq"] == pytest.approx(before["reduced_chisq"], rel=1e-3)
+  assert after["fitted"]["scale"] / before["fitted"]["scale"] == pytest.approx(
+    (5 / 3.86) ** 2, rel=0.02
+  )
+
+
+def test_extra_models_are_fitted_without_refitting_existing_candidates(
+  workspace, monkeypatch
+):
+  session_id = sessions.create_session(file=None, example="sphere", user_id=None)[
+    "session_id"
+  ]
+  procedure.fit_suggestions(session_id, None, 1, "sphere")
+  sessions.set_parameter(
+    session_id,
+    name="radius",
+    value=None,
+    minimum=1.0,
+    maximum=None,
+    vary=None,
+    user_id=None,
+  )
+  refined = sessions.run_fit(session_id, method="lm", user_id=None)
+
+  fitted: list[str] = []
+  original = procedure._fit_candidate
+
+  def counting(session, model, *args, **kwargs):
+    fitted.append(model)
+    return original(session, model, *args, **kwargs)
+
+  monkeypatch.setattr(procedure, "_fit_candidate", counting)
+  again = procedure.fit_suggestions(session_id, None, 1, "sphere,cylinder")
+
+  assert fitted == ["cylinder"]
+  assert again["newly_fitted"] == ["cylinder"]
+  assert {item["model"] for item in again["candidates"]} == {"sphere", "cylinder"}
+  # The refined sphere stays selected unless the new candidate ranks first.
+  if again["candidates"][0]["model"] == "sphere":
+    assert again["selected_model"] == "sphere"
+    assert again["selected_fit"]["statistics"] == refined["statistics"]
+
+  # A changed Q range invalidates the kept candidates.
+  fitted.clear()
+  sessions.set_q_range(session_id, q_min=0.005, q_max=None, user_id=None)
+  procedure.fit_suggestions(session_id, None, 1, "sphere")
+  assert fitted == ["sphere"]

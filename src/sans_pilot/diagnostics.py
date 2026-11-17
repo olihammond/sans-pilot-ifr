@@ -21,7 +21,10 @@ REGION_BIAS_SIGMA = 1.0
 POORLY_DETERMINED_RELATIVE_ERROR = 0.5
 
 THRESHOLDS: dict[str, Any] = {
-  "good": f"reduced chi-squared <= {REDUCED_CHISQ_GOOD:g} and no issues",
+  "good": (
+    f"reduced chi-squared <= {REDUCED_CHISQ_GOOD:g}, residuals not systematic, "
+    "uncertainties not conditional"
+  ),
   "acceptable": f"reduced chi-squared <= {REDUCED_CHISQ_ACCEPTABLE:g}",
   "poor": f"reduced chi-squared > {REDUCED_CHISQ_ACCEPTABLE:g}",
   "systematic_residuals": f"runs-test z < {RUNS_Z_SYSTEMATIC:g}",
@@ -153,7 +156,13 @@ def describe_features(data: Any) -> dict[str, Any]:
 
   hints: list[str] = []
   if low_slope is not None:
-    if low_slope > -0.3:
+    if low_slope > 0.3:
+      hints.append(
+        "Intensity falls towards low Q (suppressed forward scattering): "
+        "particles repel each other, so a structure factor is needed "
+        "(hardsphere for uncharged, hayter_msa for charged particles)."
+      )
+    elif low_slope > -0.3:
       hints.append(
         "Low-Q plateau: compact, non-interacting particles are plausible "
         "(sphere, ellipsoid, core_shell_sphere)."
@@ -173,7 +182,7 @@ def describe_features(data: Any) -> dict[str, Any]:
         "Steep low-Q upturn: large structures, aggregation, or Porod "
         "scattering from sharp interfaces (power_law, porod, fractal)."
       )
-  if features["peak"] is not None:
+  if features["peak"] is not None and not (low_slope and low_slope > 0.3):
     hints.append(
       "An interference peak is present: consider a structure factor "
       "(hardsphere, hayter_msa) or an ordered/lamellar model."
@@ -201,6 +210,8 @@ def baseline_models(features: dict[str, Any]) -> list[str]:
   slope = features.get("low_q_log_slope")
   if not isinstance(slope, (int, float)):
     return []
+  if slope > 0.3:
+    return ["sphere@hardsphere", "sphere@hayter_msa"]
   if slope > -0.3:
     models = ["sphere", "ellipsoid"]
   elif slope > -1.5:
@@ -282,10 +293,26 @@ def assess_fit(
   residuals: dict[str, Any] | None,
   *,
   has_uncertainties: bool,
+  conditional_on: list[str] | None = None,
 ) -> dict[str, Any]:
-  """Turn fit statistics into a verdict, a list of issues, and next actions."""
+  """Turn fit statistics into a verdict, a list of issues, and next actions.
+
+  ``conditional_on`` names parameters that were fixed at their own fitted
+  values, which leaves the fit unchanged but shrinks the other uncertainties.
+  """
   issues: list[str] = []
   suggestions: list[str] = []
+  if conditional_on:
+    names = ", ".join(conditional_on)
+    issues.append(
+      f"Uncertainties are conditional: {names} held at fitted values, not "
+      "independently known ones. The reported standard errors understate the "
+      "real uncertainty and hide correlations with those parameters."
+    )
+    suggestions.append(
+      f"Let {names} vary again (set-sans-parameter vary=true) for honest "
+      "uncertainties, unless their values are known independently."
+    )
   reduced = fit_result.get("reduced_chisq")
   reduced = float(reduced) if isinstance(reduced, (int, float)) else None
 
@@ -338,8 +365,12 @@ def assess_fit(
     more = f"; and {len(correlated) - 4} more" if len(correlated) > 4 else ""
     issues.append(f"Strongly correlated parameters: {shown}{more}.")
     suggestions.append(
-      "The data cannot separate the correlated parameters: fix one of each "
-      "pair at a known value with set-sans-parameter vary=false."
+      "The data cannot separate the correlated parameters. If one of a pair "
+      "is known independently (composition, another measurement), set it to "
+      "that value with set-sans-parameter value=... vary=false. Never fix a "
+      "parameter at its fitted value: the fit stays the same and the other "
+      "uncertainties become misleadingly small. Otherwise report the "
+      "correlation as a limitation."
     )
 
   parameters = fit_result.get("parameters") or {}
@@ -355,8 +386,9 @@ def assess_fit(
   if poorly:
     issues.append("Poorly determined parameters: " + ", ".join(poorly) + ".")
     suggestions.append(
-      "Fix " + ", ".join(poorly) + " or choose a simpler model; their "
-      "uncertainty exceeds half their value."
+      "The uncertainty of " + ", ".join(poorly) + " exceeds half the value. "
+      "Set them to independently known values if you have them, or choose a "
+      "simpler model; do not fix them at their fitted values."
     )
 
   if residuals and residuals.get("runs_z") is not None:
@@ -399,6 +431,8 @@ def assess_fit(
     suggestions.append(
       "Try another model from suggest-sans-models, or let more parameters vary."
     )
+  if verdict == "good" and conditional_on:
+    verdict = "acceptable"
   if verdict == "good" and not issues:
     suggestions.append(
       "The fit is statistically consistent with the data. Check the "

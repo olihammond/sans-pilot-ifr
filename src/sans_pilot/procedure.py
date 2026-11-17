@@ -173,10 +173,30 @@ def _solve_scale_background(fitter: IQuana) -> None:
     fitter.set_param("background", value=float(background))
 
 
+def parse_fixed_parameters(text: str | None) -> dict[str, float]:
+  """Parse 'sld=0.4, sld_solvent=6.36' into independently known values."""
+  fixed: dict[str, float] = {}
+  for item in (text or "").replace(";", ",").split(","):
+    if not item.strip():
+      continue
+    name, separator, value = item.partition("=")
+    try:
+      if not separator or not name.strip():
+        raise ValueError
+      fixed[name.strip()] = float(value)
+    except ValueError:
+      raise SessionError(
+        f"fixed_parameters entry '{item.strip()}' must look like name=number, "
+        "for example 'sld=0.4,sld_solvent=6.36'."
+      ) from None
+  return fixed
+
+
 def _configure_candidate(
   fitter: IQuana,
   expression: str,
   start: dict[str, Any] | None,
+  fixed: dict[str, float] | None = None,
 ) -> list[str]:
   """Apply starting values and choose bounded free parameters for one fit."""
   notes: list[str] = []
@@ -210,7 +230,22 @@ def _configure_candidate(
     except Exception as exc:
       notes.append(f"Polydispersity for {name} was not applied: {exc}")
 
-  if start is None:
+  # Independently known values (for example SLDs) replace the library's and
+  # stay fixed; the scale is re-solved because the contrast has changed.
+  known = {
+    name: value for name, value in (fixed or {}).items() if name in fitter.params
+  }
+  for name, value in known.items():
+    current = fitter.params[name]
+    low, high = current.get("min"), current.get("max")
+    fitter.set_param(
+      name,
+      value=value,
+      min=min(float(low), value) if low is not None else None,
+      max=max(float(high), value) if high is not None else None,
+      vary=False,
+    )
+  if start is None or known:
     _solve_scale_background(fitter)
 
   limits = _hard_limits(expression)
@@ -218,6 +253,8 @@ def _configure_candidate(
   arrays = active_arrays(fitter.data)
   typical = float(np.median(np.abs(arrays["i"]))) if arrays["i"].size else 1.0
   for name in default_free_parameters(fitter, expression):
+    if name in known:
+      continue
     value = float(fitter.params[name]["value"])
     hard_low, hard_high = limits.get(name, (-math.inf, math.inf))
     if name == "background":
@@ -245,9 +282,13 @@ def _fit_candidate(
   start: dict[str, Any] | None,
   library_chisq_n: float | None,
   origin: str,
+  fixed: dict[str, float] | None = None,
+  start_note: str | None = None,
 ) -> dict[str, Any]:
   expression = _expression(model, structure_factor)
   candidate: dict[str, Any] = {"model": expression, "origin": origin}
+  if start_note:
+    candidate["note"] = start_note
   if library_chisq_n is not None:
     candidate["library_chisq_n"] = library_chisq_n
   warnings_out: list[str] = []
@@ -255,7 +296,7 @@ def _fit_candidate(
   try:
     with quiet_science(warnings_out):
       fitter = new_fitter(session, model, structure_factor)
-      notes = _configure_candidate(fitter, expression, start)
+      notes = _configure_candidate(fitter, expression, start, fixed)
       # Library starts are already polished, so LM converges directly (simplex
       # is the fallback).  From model defaults, a simplex search runs first.
       methods = ("lm", "amoeba") if start is not None else ("amoeba", "lm")
@@ -357,8 +398,17 @@ def _select(session: Session, expression: str) -> dict[str, Any]:
   }
   summaries = session.meta.get("candidate_summaries") or {}
   session.meta["last_fit"] = summaries.get(expression)
+  session.meta["conditional_on"] = []
   session.mark_fitted()
   return session.meta["last_fit"] or {}
+
+
+def _probe_data(session: Session) -> Any:
+  with quiet_science():
+    probe = IQuana()
+    probe.set_data(read_data(session))
+    _apply_q_range(probe, session)
+  return probe.data
 
 
 def fit_suggestions(
@@ -367,55 +417,93 @@ def fit_suggestions(
   top: int,
   extra_models: str | None,
   include_baselines: bool = True,
+  fixed_parameters: str | None = None,
 ) -> dict[str, Any]:
-  """Fit the top library suggestions, simple baselines and named models."""
+  """Fit the top library suggestions, simple baselines and named models.
+
+  Candidates already fitted in this session under the same Q range and fixed
+  parameters are kept; a later call with ``extra_models`` fits only the new
+  ones and re-ranks everything.
+  """
   session = load_session(session_id, user_id=user_id)
   top = max(1, min(int(top), MAX_CANDIDATES))
   extras = _split_models(extra_models)
+  if fixed_parameters is not None:
+    session.meta["fixed_parameters"] = parse_fixed_parameters(fixed_parameters)
+  fixed: dict[str, float] = dict(session.meta.get("fixed_parameters") or {})
 
-  # (model, structure factor, library start, library score, origin)
-  plan: list[tuple[str, str | None, dict[str, Any] | None, float | None, str]] = []
+  context = {"q_range": session.meta.get("q_range"), "fixed": fixed}
+  previous = [
+    dict(item)
+    for item in session.meta.get("candidates") or []
+    if session.meta.get("candidates_context") == context
+  ]
+  from_library = sum(1 for item in previous if item.get("origin") == "curve library")
+  reuse = bool(previous) and top <= max(from_library, 1)
+  known_models = {item["model"] for item in previous} if reuse else set()
+
+  # Each entry: model, structure factor, library start, library score, origin, note
+  plan: list[dict[str, Any]] = []
   guess_note: str | None = None
   status = guess_status()
-  if status["available"]:
+  new_extras = [pair for pair in extras if _expression(*pair) not in known_models]
+  if status["available"] and (new_extras or not reuse):
     baselines = (
       _split_models(",".join(baseline_models(session.meta.get("features") or {})))
-      if include_baselines
+      if include_baselines and not reuse
       else []
     )
-    also = list(dict.fromkeys([*extras, *baselines[:MAX_BASELINES]]))
+    also = list(dict.fromkeys([*new_extras, *baselines[:MAX_BASELINES]]))
     with quiet_science():
-      probe = IQuana()
-      probe.set_data(read_data(session))
-      _apply_q_range(probe, session)
       guess = suggest_models(
-        probe.data, top=max(top, 5), starting_values=top, also=also
+        _probe_data(session),
+        top=1 if reuse else max(top, 5),
+        starting_values=0 if reuse else top,
+        also=also,
       )
-    session.meta["suggestions"] = guess["suggestions"]
-    for item in guess["suggestions"]:
-      if len(plan) >= top:
-        break
-      if item["loadable"] and "start" in item:
-        plan.append(
-          (
-            item["model"],
-            item["structure_factor"],
-            item["start"],
-            item["library_chisq_n"],
-            "curve library",
+    if not reuse:
+      session.meta["suggestions"] = guess["suggestions"]
+      for item in guess["suggestions"]:
+        if len(plan) >= top:
+          break
+        if item["loadable"] and "start" in item:
+          plan.append(
+            {
+              "model": item["model"],
+              "structure_factor": item["structure_factor"],
+              "start": item["start"],
+              "library_chisq_n": item["library_chisq_n"],
+              "origin": "curve library",
+            }
           )
-        )
     for item in guess.get("requested") or []:
       pair = (item["model"], item["structure_factor"])
-      if any(pair == (p[0], p[1]) for p in plan):
+      if any(pair == (p["model"], p["structure_factor"]) for p in plan):
         continue
-      origin = "requested" if pair in extras else "simple baseline"
-      plan.append((*pair, item.get("start"), None, origin))
-  else:
+      plan.append(
+        {
+          "model": pair[0],
+          "structure_factor": pair[1],
+          "start": item.get("start"),
+          "library_chisq_n": None,
+          "origin": "requested" if pair in extras else "simple baseline",
+          "start_note": item.get("note"),
+        }
+      )
+  elif not status["available"]:
     guess_note = status["reason"]
-    plan = [(*pair, None, None, "requested") for pair in extras]
+    plan = [
+      {
+        "model": pair[0],
+        "structure_factor": pair[1],
+        "start": None,
+        "library_chisq_n": None,
+        "origin": "requested",
+      }
+      for pair in new_extras
+    ]
 
-  if not plan:
+  if not plan and not previous:
     return {
       "session_id": session.id,
       "status": "needs_model",
@@ -428,33 +516,54 @@ def fit_suggestions(
     }
 
   limit = MAX_CANDIDATES + MAX_BASELINES
-  candidates = [_fit_candidate(session, *item) for item in plan[:limit]]
+  fitted_now = [
+    _fit_candidate(
+      session,
+      item["model"],
+      item["structure_factor"],
+      item["start"],
+      item["library_chisq_n"],
+      item["origin"],
+      fixed,
+      item.get("start_note"),
+    )
+    for item in plan[:limit]
+  ]
+  candidates = [*(previous if reuse else []), *fitted_now]
   calibrated = bool(session.meta.get("data", {}).get("has_intensity_errors"))
   _rank(candidates, calibrated=calibrated)
 
-  session.meta["candidate_summaries"] = {
-    item["model"]: item.pop("_summary") for item in candidates if "_summary" in item
-  }
-  notes = [note for item in candidates for note in item.pop("_notes", [])]
+  summaries = dict(session.meta.get("candidate_summaries") or {}) if reuse else {}
+  summaries.update(
+    {item["model"]: item.pop("_summary") for item in fitted_now if "_summary" in item}
+  )
+  session.meta["candidate_summaries"] = summaries
+  notes = [note for item in fitted_now for note in item.pop("_notes", [])]
   session.meta["candidates"] = candidates
+  session.meta["candidates_context"] = context
   succeeded = [item for item in candidates if "error" not in item]
-  selected: dict[str, Any] = {}
-  if succeeded:
-    selected = _select(session, succeeded[0]["model"])
+  new_models = {item["model"] for item in fitted_now if "error" not in item}
+  # On a first run the best candidate becomes the session's model.  Later
+  # calls leave the current (possibly refined) model alone unless a newly
+  # fitted candidate ranks first.
+  if succeeded and (not reuse or succeeded[0]["model"] in new_models):
+    _select(session, succeeded[0]["model"])
   session.log(
     "fit_suggestions",
-    tried=[item["model"] for item in candidates],
-    selected=succeeded[0]["model"] if succeeded else None,
+    fitted=[item["model"] for item in fitted_now],
+    kept=[item["model"] for item in previous] if reuse else [],
+    selected=model_expression(session),
   )
   session.save()
 
   result: dict[str, Any] = {
     "session_id": session.id,
     "status": "fitted" if succeeded else "all_fits_failed",
+    "newly_fitted": [item["model"] for item in fitted_now],
     "candidates": candidates,
     "ranking": RANKING_NOTE if calibrated else RANKING_NOTE_NO_ERRORS,
-    "selected_model": model_expression(session) if succeeded else None,
-    "selected_fit": selected or None,
+    "selected_model": model_expression(session),
+    "selected_fit": session.meta.get("last_fit"),
     "caution": CAUTION,
     "warnings": list(dict.fromkeys(notes))[:10],
     "next_steps": [
@@ -464,6 +573,8 @@ def fit_suggestions(
     if succeeded
     else ["set-sans-model to choose a model yourself"],
   }
+  if fixed:
+    result["fixed_parameters"] = fixed
   if guess_note:
     result["guess_unavailable"] = guess_note
   return result
@@ -495,13 +606,18 @@ def guided_analysis(
   q_min: float | None,
   q_max: float | None,
   include_baselines: bool = True,
+  fixed_parameters: str | None = None,
 ) -> dict[str, Any]:
   """Run the whole fixed procedure for one dataset."""
   started = create_session(file=file, example=example, user_id=user_id)
   session_id = started["session_id"]
   if q_min is not None or q_max is not None:
     set_q_range(session_id, q_min=q_min, q_max=q_max, user_id=user_id)
-  fitted = fit_suggestions(session_id, user_id, top, extra_models, include_baselines)
+  if fixed_parameters:
+    parse_fixed_parameters(fixed_parameters)
+  fitted = fit_suggestions(
+    session_id, user_id, top, extra_models, include_baselines, fixed_parameters
+  )
   session = load_session(session_id, user_id=user_id)
   return {
     "session_id": session_id,

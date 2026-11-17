@@ -250,3 +250,52 @@ def test_runner_reminds_a_model_that_stops_without_refitting(tmp_path, monkeypat
   assert "Settings changed after this fit and not fitted" in report
   assert (tmp_path / "out" / "analysis.json").is_file()
   assert (tmp_path / "out" / "transcript.json").is_file()
+
+
+def test_report_says_when_the_models_turn_changed_nothing(tmp_path, monkeypatch):
+  monkeypatch.setenv("SANS_PILOT_GUESS", "off")
+  requests: list[dict] = []
+
+  def call(identifier: str, name: str, arguments: dict) -> dict:
+    return {
+      "id": identifier,
+      "type": "function",
+      "function": {"name": name, "arguments": json.dumps(arguments)},
+    }
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    requests.append(json.loads(request.content))
+    turn = len(requests)
+    if turn == 1:
+      return _reply(
+        content="",
+        tool_calls=[call("a", "set-sans-parameter", {"name": "scale", "vary": False})],
+      )
+    if turn == 2:
+      return _reply(content="", tool_calls=[call("b", "run-sans-fit", {})])
+    return _reply(content="| Parameter | Value |\n|---|---|\n| radius | 1 |")
+
+  config = AgentConfig(
+    out=tmp_path / "out",
+    data=DATA,
+    model="fixer",
+    extra_models="sphere",
+    fixed_parameters="sld_solvent=6.3",
+    plot=False,
+  )
+  result = asyncio.run(
+    run_agent(config, transport=httpx.MockTransport(handler), log=lambda _line: None)
+  )
+
+  warned = next(m for m in requests[1]["messages"] if m["role"] == "tool")
+  assert "fixed at its own fitted value" in warned["content"]
+  report = result.report.read_text(encoding="utf-8")
+  assert "did not change the fit" in report
+  assert "Uncertainties are conditional:** scale" in report
+  assert result.verdict != "good"
+
+  page = (tmp_path / "out" / "report.html").read_text(encoding="utf-8")
+  assert "SANS-PILOT-EXTRA" not in page
+  assert "Interpretation by fixer" in page and "<th>Parameter</th>" in page
+  assert "did not change the fit" in page
+  assert "sld_solvent = 6.3" in page

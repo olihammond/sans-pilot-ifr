@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import html
 import json
 import os
 import re
@@ -34,7 +35,7 @@ import httpx
 from fastmcp import Client
 
 DEFAULT_BASE_URL = "http://localhost:11434/v1"
-MAX_TOOL_RESULT_CHARS = 6_000
+MAX_TOOL_RESULT_CHARS = 9_000
 # Tools the model may call.  Loading data, running the guided procedure and
 # exporting stay with the runner so the outcome never depends on the model.
 MODEL_TOOLS = (
@@ -73,6 +74,11 @@ Rules:
 - A low chi-squared means a model CAN describe the data, not that it is right.
 - Prefer the simpler model when candidates are marked close_to_best.
 - Keep SLD parameters fixed unless the user gave their values.
+- Never fix a parameter at its own fitted value (vary=false without a new
+  value). That leaves the fit unchanged and only makes the other uncertainties
+  look smaller. Fix a parameter only at an independently known value.
+- Strong correlations that cannot be resolved are a limitation to report, not
+  something to hide.
 """.strip()
 
 
@@ -89,6 +95,7 @@ class AgentConfig:
   sample: str = ""
   top: int = 3
   extra_models: str | None = None
+  fixed_parameters: str | None = None
   q_min: float | None = None
   q_max: float | None = None
   max_steps: int = 12
@@ -262,6 +269,7 @@ async def refine_with_model(
       "features",
       "candidates",
       "ranking",
+      "fixed_parameters",
       "selected_model",
       "selected_fit",
       "caution",
@@ -401,52 +409,123 @@ def _prepare_workspace(config: AgentConfig) -> str | None:
   return target.name
 
 
-def _append_report(
-  report: Path, config: AgentConfig, result: AgentResult, guided: dict[str, Any]
-) -> None:
-  lines = ["", "## How this report was produced", ""]
-  lines.append(
-    "The data loading, model suggestions (Sassafras curve library), candidate "
-    "fits (IQuana) and diagnostics above were computed deterministically by "
-    "sans-pilot."
+def _comparison(
+  guided: dict[str, Any], result: AgentResult, last_fit: dict[str, Any]
+) -> list[str]:
+  """Describe honestly what the language model's turn changed."""
+  before = (guided.get("selected_fit") or {}).get("statistics") or {}
+  after = last_fit.get("statistics") or {}
+  same_model = guided.get("selected_model") == result.model
+  chisq_before, chisq_after = before.get("chisq"), after.get("chisq")
+  lines: list[str] = []
+  unchanged = (
+    same_model
+    and isinstance(chisq_before, (int, float))
+    and isinstance(chisq_after, (int, float))
+    and abs(chisq_after - chisq_before) <= 1e-6 * max(abs(chisq_before), 1.0)
   )
-  if guided.get("guess_unavailable"):
-    lines.append(f"Model suggestions were unavailable: {guided['guess_unavailable']}")
-  if config.sample.strip():
-    lines += ["", "Sample description supplied by the user:", "", f"> {config.sample}"]
-  if config.model and guided.get("selected_fit"):
-    before = (guided["selected_fit"].get("statistics") or {}).get("reduced_chisq")
-    lines += [
-      "",
+  if unchanged:
+    lines.append(
+      f"The language model's turn did not change the fit: the model is still "
+      f"`{result.model}` and χ² is still {chisq_after}."
+    )
+    if after.get("n_free") != before.get("n_free"):
+      lines.append(
+        f"It changed the number of free parameters from {before.get('n_free')} "
+        f"to {after.get('n_free')}, which alters χ²/dof and the reported "
+        "uncertainties without altering the fit."
+      )
+  else:
+    lines.append(
       f"Before the language model's turn the selected model was "
-      f"`{guided.get('selected_model')}` with χ²/dof {before}; afterwards it is "
-      f"`{result.model}` with χ²/dof {result.reduced_chisq} "
-      f"(verdict: {result.verdict}). The pre-refinement state is saved as "
-      "`analysis_guided.json`.",
-    ]
+      f"`{guided.get('selected_model')}` (χ² {chisq_before}, χ²/dof "
+      f"{before.get('reduced_chisq')}, {before.get('n_free')} free); afterwards "
+      f"it is `{result.model}` (χ² {chisq_after}, χ²/dof "
+      f"{after.get('reduced_chisq')}, {after.get('n_free')} free)."
+    )
     if (
-      isinstance(before, (int, float))
-      and isinstance(result.reduced_chisq, (int, float))
-      and result.reduced_chisq > 1.5 * before
+      same_model
+      and isinstance(chisq_before, (int, float))
+      and isinstance(chisq_after, (int, float))
+      and chisq_after > 1.5 * chisq_before
     ):
       lines.append(
         "**The refinement made the fit worse.** Prefer `analysis_guided.json` "
         "unless the change is justified by knowledge of the sample."
       )
+  conditional = last_fit.get("conditional_on") or []
+  if conditional:
+    lines.append(
+      "**Uncertainties are conditional:** "
+      + ", ".join(conditional)
+      + " were fixed at their own fitted values. The standard errors in the "
+      "final fit understate the real uncertainty; `analysis_guided.json` "
+      "holds the fit with those parameters free."
+    )
+  lines.append("The pre-refinement state is saved as `analysis_guided.json`.")
+  return lines
+
+
+def _append_report(
+  report: Path,
+  config: AgentConfig,
+  result: AgentResult,
+  guided: dict[str, Any],
+  last_fit: dict[str, Any],
+) -> None:
+  """Add the runner's own sections to report.md and report.html."""
+  from sans_pilot.report_html import EXTRA_MARKER, markdown_to_html
+
+  produced = [
+    "The data loading, model suggestions (Sassafras curve library), candidate "
+    "fits (IQuana) and diagnostics were computed deterministically by "
+    "sans-pilot."
+  ]
+  if guided.get("guess_unavailable"):
+    produced.append(
+      f"Model suggestions were unavailable: {guided['guess_unavailable']}"
+    )
+  if config.sample.strip():
+    produced.append(f"Sample description supplied by the user: {config.sample}")
+  if config.model and guided.get("selected_fit"):
+    produced += _comparison(guided, result, last_fit)
+
+  disclaimer = (
+    "Written by a language model from the results above. It has not been "
+    "checked; verify numbers against the tables in this report."
+  )
+  interpretation = result.interpretation or "_The model produced no interpretation._"
+
+  lines = ["", "## How this report was produced", "", *produced]
+  page = ["<h2>How this report was produced</h2>"] + [
+    markdown_to_html(item) for item in produced
+  ]
   if config.model:
     lines += [
       "",
       f"## Interpretation by `{config.model}`",
       "",
-      "_Written by a language model from the results above. It has not been "
-      "checked; verify numbers against the tables in this report._",
+      f"_{disclaimer}_",
       "",
-      result.interpretation or "_The model produced no interpretation._",
+      interpretation,
+    ]
+    page += [
+      f"<h2>Interpretation by {html.escape(config.model)}</h2>",
+      f"<div class=note>{html.escape(disclaimer)}</div>",
+      markdown_to_html(interpretation),
     ]
     if result.llm_note:
       lines += ["", f"Note: {result.llm_note}"]
+      page.append(f"<p class=small>Note: {html.escape(result.llm_note)}</p>")
   with report.open("a", encoding="utf-8") as handle:
     handle.write("\n".join(lines) + "\n")
+
+  html_report = report.with_suffix(".html")
+  if html_report.is_file():
+    text = html_report.read_text(encoding="utf-8")
+    html_report.write_text(
+      text.replace(EXTRA_MARKER, "\n".join(page)), encoding="utf-8"
+    )
 
 
 async def run_agent(
@@ -471,7 +550,7 @@ async def run_agent(
       arguments["file"] = stored_name
     else:
       arguments["example"] = config.example
-    for key in ("extra_models", "q_min", "q_max"):
+    for key in ("extra_models", "fixed_parameters", "q_min", "q_max"):
       if getattr(config, key) is not None:
         arguments[key] = getattr(config, key)
     try:
@@ -534,13 +613,16 @@ async def run_agent(
     llm_note=note,
     llm_steps=steps,
   )
-  _append_report(result.report, config, result, guided)
+  _append_report(result.report, config, result, guided, last_fit)
   if summary.get("unfitted_changes"):
     log(
       "  note: the model changed settings without refitting; the report shows "
       "the last completed fit and lists the unfitted changes."
     )
   log(f"Model: {result.model}  verdict: {result.verdict}")
+  html_report = result.report.with_suffix(".html")
+  if html_report.is_file():
+    log(f"Open:   {html_report}  (figures and tables)")
   log(f"Report: {result.report}")
   return result
 
@@ -574,6 +656,12 @@ def build_parser() -> argparse.ArgumentParser:
   parser.add_argument("--sample", default="", help="what is known about the sample")
   parser.add_argument("--top", type=int, default=3, help="suggestions to fit (1-6)")
   parser.add_argument("--extra-models", help="also fit these, e.g. 'sphere,cylinder'")
+  parser.add_argument("--sld", type=float, help="known particle SLD (1e-6/Å²)")
+  parser.add_argument("--sld-solvent", type=float, help="known solvent SLD (1e-6/Å²)")
+  parser.add_argument(
+    "--fixed",
+    help="other known values held fixed, e.g. 'sld_core=0.4,temperature=298'",
+  )
   parser.add_argument("--q-min", type=float)
   parser.add_argument("--q-max", type=float)
   parser.add_argument("--max-steps", type=int, default=12, help="model turn budget")
@@ -591,7 +679,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.data is not None
     else Path(f"{args.example}_analysis")
   )
+  known = [
+    item
+    for item in (
+      f"sld={args.sld}" if args.sld is not None else "",
+      f"sld_solvent={args.sld_solvent}" if args.sld_solvent is not None else "",
+      args.fixed or "",
+    )
+    if item
+  ]
   config = AgentConfig(
+    fixed_parameters=",".join(known) or None,
     out=out,
     data=args.data,
     example=args.example,
