@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 import shutil
 import time
+import uuid
 from typing import Any
 
 import numpy as np
@@ -457,6 +458,56 @@ def _bic(fit_result: dict[str, Any]) -> float:
   return float(chisq) + float(free) * math.log(max(float(points), 1.0))
 
 
+def _trial_copy(session: Session, fitter: IQuana) -> IQuana:
+  """Return an independent copy of a fitter through its analysis file."""
+  path = session.directory / f"_trial_{uuid.uuid4().hex[:8]}.json"
+  try:
+    fitter.save_analysis(str(path))
+    return IQuana.load_analysis(str(path))
+  finally:
+    path.unlink(missing_ok=True)
+
+
+def _drop_fixed_polydispersity(
+  session: Session,
+  fitter: IQuana,
+  fit_result: dict[str, Any],
+) -> tuple[IQuana, dict[str, Any], list[str]]:
+  """Remove size distributions the curve library fixed but the data rejects.
+
+  Guess attaches polydispersity from a coarse scan (often 20% on every size)
+  and holds it fixed.  A width that is wrong for the sample blurs the model
+  and leaves systematic residuals no other parameter can absorb.  Each fixed,
+  non-zero width is set to zero on a copy and the copy is refitted; it is
+  kept when BIC improves.  Widths being fitted are left alone.
+  """
+  if not fitter.is_polydispersity_enabled():
+    return fitter, fit_result, []
+  notes: list[str] = []
+  for name in [str(item) for item in fitter.get_polydisperse_parameters()]:
+    setting = fitter.get_pd_param(name)
+    width = float(setting.get("pd") or 0.0)
+    if width <= 0 or setting.get("vary"):
+      continue
+    try:
+      trial = _trial_copy(session, fitter)
+      trial.set_pd_param(
+        name, pd_width=0.0, pd_type=str(setting.get("pd_type") or "gaussian")
+      )
+      options, _, _ = _fit_budget(trial)
+      with time_limit(CANDIDATE_METHOD_SECONDS):
+        trial_result = trial.fit(engine="bumps", method="lm", **options)
+    except Exception:
+      continue
+    if _bic(trial_result) < _bic(fit_result) - 2.0:
+      fitter, fit_result = trial, trial_result
+      notes.append(
+        f"The fixed {width:.0%} polydispersity on {name} supplied by the curve "
+        "library was removed: the fit is better without it (BIC improved)."
+      )
+  return fitter, fit_result, notes
+
+
 def _refine_polydispersity(
   session: Session,
   fitter: IQuana,
@@ -486,10 +537,8 @@ def _refine_polydispersity(
   if target is None:
     return fitter, fit_result, None
 
-  path = session.directory / "_pd_trial.json"
   try:
-    fitter.save_analysis(str(path))
-    trial = IQuana.load_analysis(str(path))
+    trial = _trial_copy(session, fitter)
     trial.enable_polydispersity(True)
     current = trial.get_pd_param(target)
     trial.set_pd_param(
@@ -503,8 +552,6 @@ def _refine_polydispersity(
       trial_result = trial.fit(engine="bumps", method="lm", **trial_options)
   except Exception:
     return fitter, fit_result, None
-  finally:
-    path.unlink(missing_ok=True)
   if _bic(trial_result) < _bic(fit_result) - 2.0:
     width = float(trial.get_pd_param(target).get("pd") or 0.0)
     return (
@@ -627,6 +674,10 @@ def _fit_candidate(
         fitter, fit_result, initial, final_options
       )
       procedure_notes += degenerate
+      fitter, fit_result, dropped = _drop_fixed_polydispersity(
+        session, fitter, fit_result
+      )
+      procedure_notes += dropped
       fitter, fit_result, spread_note = _refine_polydispersity(
         session, fitter, fit_result, expression
       )
@@ -655,7 +706,20 @@ def _fit_candidate(
       "started_from": "curve library" if start is not None else "model defaults",
       "seconds": round(time.perf_counter() - started, 1),
       "_summary": summary,
-      "_notes": filter_actionable_warnings([*notes, *warnings_out]),
+      # Warnings raised by trial fits that were discarded (restarts,
+      # polydispersity trials) do not describe the kept fit; bounds and
+      # numerical problems of the kept fit are in its diagnostics.
+      "_notes": filter_actionable_warnings(
+        [
+          *notes,
+          *(
+            item
+            for item in warnings_out
+            if not item.startswith("Fitted parameter(s) at a bound")
+            and "encountered in" not in item
+          ),
+        ]
+      ),
     }
   )
   return candidate

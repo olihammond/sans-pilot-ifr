@@ -691,3 +691,42 @@ def test_polymer_models_keep_an_unlimited_scale(workspace):
   )
   assert changed["parameter"]["scale"]["value"] == 25.0
   assert changed["parameter"]["scale"]["max"] == 1000.0
+
+
+def test_a_wrong_fixed_library_polydispersity_is_removed(workspace):
+  name = _upload_sphere(workspace, scale=0.05)
+  session_id = sessions.create_session(file=name, example=None, user_id=None)[
+    "session_id"
+  ]
+  session = sessions.load_session(session_id, user_id=None)
+  with sessions.quiet_science():
+    fitter = sessions.new_fitter(session, "sphere", None)
+    fitter.enable_polydispersity(True)
+    fitter.set_pd_param("radius", pd_width=0.3, pd_type="schulz", vary=False)
+    fitter.set_param("radius", value=50, min=10, max=200, vary=True)
+    fitter.set_param("scale", value=0.05, min=0.001, max=1, vary=True)
+    fit_result = fitter.fit(engine="bumps", method="lm")
+    kept, kept_result, notes = procedure._drop_fixed_polydispersity(
+      session, fitter, fit_result
+    )
+
+  assert len(notes) == 1 and "30% polydispersity on radius" in notes[0]
+  assert kept_result["chisq"] < fit_result["chisq"]
+  assert not kept.get_pd_param("radius").get("pd")
+  assert kept.params["radius"]["value"] == pytest.approx(50, rel=0.02)
+
+
+def test_reports_say_when_the_q_range_was_restricted(workspace):
+  session_id = sessions.create_session(file=None, example="sphere", user_id=None)[
+    "session_id"
+  ]
+  procedure.fit_suggestions(session_id, None, 1, "sphere")
+  sessions.set_q_range(session_id, q_min=0.01, q_max=None, user_id=None)
+  sessions.run_fit(session_id, method="lm", user_id=None)
+  sessions.export_session(session_id, None, workspace / "export", include_plot=False)
+
+  report = (workspace / "export" / "report.md").read_text(encoding="utf-8")
+  assert "**Q range restricted** (q_min=0.01" in report
+  assert " of " in report.split("Points fitted:")[1].splitlines()[0]
+  page = (workspace / "export" / "report.html").read_text(encoding="utf-8")
+  assert "Q range restricted" in page

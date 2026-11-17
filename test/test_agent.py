@@ -299,3 +299,10 @@ def test_report_says_when_the_models_turn_changed_nothing(tmp_path, monkeypatch)
   assert "Interpretation by fixer" in page and "<th>Parameter</th>" in page
   assert "did not change the fit" in page
   assert "sld_solvent = 6.3" in page
+
+
+def test_the_model_cannot_change_the_q_range():
+  from sans_pilot.agent import MODEL_TOOLS, SYSTEM_PROMPT
+
+  assert "set-sans-q-range" not in MODEL_TOOLS
+  assert "Q range is the user's choice" in SYSTEM_PROMPT

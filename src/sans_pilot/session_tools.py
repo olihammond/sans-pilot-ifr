@@ -37,7 +37,8 @@ For a single file, follow this procedure in order:
    described the sample, prefer the candidate consistent with it and switch
    with `use-sans-candidate`.
 4. If diagnostics list issues, act on ONE suggestion with `set-sans-parameter`,
-   `set-sans-polydispersity` or `set-sans-q-range`, then `run-sans-fit`.
+   `set-sans-polydispersity`, then `run-sans-fit`. Change the Q range only if
+   the user asks: dropping points to improve a fit discards information.
    Stop after the verdict is good or acceptable, or after three refinements.
 5. `export-sans-analysis`, then report the model, fitted values with
    uncertainties, reduced chi-squared, verdict and remaining issues.

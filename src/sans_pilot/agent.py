@@ -44,7 +44,6 @@ MODEL_TOOLS = (
   "set-sans-model",
   "set-sans-parameter",
   "set-sans-polydispersity",
-  "set-sans-q-range",
   "run-sans-fit",
   "get-sans-analysis",
 )
@@ -60,7 +59,7 @@ Do this, in order:
    sample suggests a model that was not tried, fit it with
    fit-sans-suggestions and extra_models.
 2. If the selected fit's diagnostics list issues, act on ONE suggestion with
-   set-sans-parameter, set-sans-polydispersity or set-sans-q-range, then call
+   set-sans-parameter or set-sans-polydispersity, then call
    run-sans-fit. Make at most three refinements. Stop early when the verdict is
    good or acceptable and no issue remains that you can act on. Every change
    must be followed by run-sans-fit: unfitted changes are not reported.
@@ -74,6 +73,8 @@ Rules:
 - A low chi-squared means a model CAN describe the data, not that it is right.
 - Prefer the simpler model when candidates are marked close_to_best.
 - Keep SLD parameters fixed unless the user gave their values.
+- The Q range is the user's choice. You cannot change it, and a model that
+  only fits part of the data is not a good model.
 - Never fix a parameter at its own fitted value (vary=false without a new
   value). That leaves the fit unchanged and only makes the other uncertainties
   look smaller. Fix a parameter only at an independently known value.
@@ -420,6 +421,16 @@ def _comparison(
   same_model = guided.get("selected_model") == result.model
   chisq_before, chisq_after = before.get("chisq"), after.get("chisq")
   lines: list[str] = []
+  if before.get("n_points") != after.get("n_points"):
+    lines.append(
+      f"The Q range changed during the language model's turn "
+      f"({before.get('n_points')} points before, {after.get('n_points')} after), "
+      f"so χ² and BIC before and after are not comparable. Before: "
+      f"`{guided.get('selected_model')}`, χ²/dof {before.get('reduced_chisq')}; "
+      f"after: `{result.model}`, χ²/dof {after.get('reduced_chisq')}."
+    )
+    lines.append("The pre-refinement state is saved as `analysis_guided.json`.")
+    return lines
   unchanged = (
     same_model
     and isinstance(chisq_before, (int, float))

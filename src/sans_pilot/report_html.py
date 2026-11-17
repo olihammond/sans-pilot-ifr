@@ -217,7 +217,8 @@ def build_html_report(
 
   parts: list[str] = [
     f"<h1>SANS analysis: {_e(name)}</h1>",
-    f"<p class=sub>Session {_e(session.id)} · {_e(data.get('points_active'))} points"
+    f"<p class=sub>Session {_e(session.id)} · {_e(data.get('points_active'))} of "
+    f"{_e(data.get('points_total'))} points"
     f" · Q {_num(q_range.get('min'))} to {_num(q_range.get('max'))} Å⁻¹</p>",
     "<div class=cards>",
     f"<div class=card><span>Selected model</span><b>{_e(model or 'none')}</b></div>",
@@ -228,6 +229,14 @@ def build_html_report(
     "</div>",
   ]
 
+  restricted = meta.get("q_range") or {}
+  if restricted.get("q_min") is not None or restricted.get("q_max") is not None:
+    parts.append(
+      "<div class='note warn'><b>Q range restricted</b> to "
+      f"q_min = {_e(restricted.get('q_min'))}, q_max = {_e(restricted.get('q_max'))}: "
+      f"{_e(data.get('points_active'))} of {_e(data.get('points_total'))} points "
+      "were fitted.</div>"
+    )
   pending = meta.get("pending_changes") or []
   if pending:
     parts.append(

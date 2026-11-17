@@ -521,11 +521,13 @@ def assess_fit(
         if name == "low_q":
           suggestions.append(
             "Low-Q misfit: add a structure factor, try a larger or more "
-            "elongated shape, or raise q_min with set-sans-q-range."
+            "elongated shape. Low-Q points carry the particle size: do not "
+            "drop them to improve the fit."
           )
         elif name == "high_q":
           suggestions.append(
-            "High-Q misfit: let background vary, or lower q_max with set-sans-q-range."
+            "High-Q misfit: let background vary, or check the polydispersity "
+            "and the shape of the interface."
           )
         else:
           suggestions.append(

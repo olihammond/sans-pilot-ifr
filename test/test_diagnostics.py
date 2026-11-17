@@ -202,3 +202,19 @@ def test_only_volume_normalised_models_have_a_scale_limit():
     has_uncertainties=True,
   )
   assert "Parameters resting on a bound: scale (at its max)." in unlimited["issues"]
+
+
+def test_misfit_suggestions_never_recommend_dropping_data():
+  q = np.linspace(0.01, 0.3, 90)
+  theory = np.ones_like(q)
+  sigma = np.full_like(q, 0.1)
+  data = theory + np.where(q < 0.1, 0.25, np.where(q > 0.2, -0.25, 0.0))
+  verdict = assess_fit(
+    {"reduced_chisq": 3.0, "parameters": {}},
+    residual_diagnostics(q, data, theory, sigma),
+    has_uncertainties=True,
+  )
+  text = " ".join(verdict["suggestions"])
+  assert "Low-Q misfit" in text and "High-Q misfit" in text
+  assert "q_min" not in text and "q_max" not in text
+  assert "do not drop them" in text

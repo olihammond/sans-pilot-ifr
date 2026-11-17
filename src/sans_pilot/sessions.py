@@ -870,8 +870,14 @@ def report_markdown(session: Session, fitter: IQuana | None) -> str:
     f"# SANS analysis report: {source.get('file_name') or source.get('name')}",
     "",
     f"- Session: `{session.id}`",
-    f"- Points fitted: {data.get('points_active')}",
+    f"- Points fitted: {data.get('points_active')} of {data.get('points_total')}",
   ]
+  restricted = meta.get("q_range") or {}
+  if restricted.get("q_min") is not None or restricted.get("q_max") is not None:
+    lines.append(
+      f"- **Q range restricted** (q_min={restricted.get('q_min')}, "
+      f"q_max={restricted.get('q_max')}): points outside it were not fitted."
+    )
   q_range = data.get("actual_q_range") or {}
   if q_range:
     lines.append(f"- Q range: {q_range.get('min'):.4g} to {q_range.get('max'):.4g} Å⁻¹")

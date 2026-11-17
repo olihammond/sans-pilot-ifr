@@ -46,6 +46,12 @@
 - Changes made after a fit and not refitted are listed; reports show the last
   completed fit.
 - Each candidate fit has an iteration budget and a wall-clock limit.
+- The language model cannot change the Q range: dropping low-Q points let a
+  wrong model win. Diagnostics no longer suggest trimming data, and reports
+  state when only part of the data was fitted.
+- Fixed polydispersity attached by the curve library is removed when the fit
+  is better without it.
+- Warnings from discarded trial fits no longer appear in results.
 - Where `scale` is a volume fraction (form factors with volume and SLD
   parameters), guided and series fits keep it at or below 1
   (`SANS_PILOT_SCALE_MAX`) and explain a fit that reaches the limit.
